@@ -21,9 +21,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# ─────────────────────────────────────────
-# CUSTOM CSS
-# ─────────────────────────────────────────
 st.markdown("""
 <style>
     .main-title {
@@ -49,6 +46,11 @@ st.markdown("""
         border: 1px solid #fde68a;
         border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
     }
+    .warning-box {
+        background-color: #fff7ed;
+        border-left: 5px solid #f97316;
+        border-radius: 8px; padding: 16px; margin-top: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,7 +68,7 @@ if model_loaded:
     model, scaler = load_model()
 
 # ─────────────────────────────────────────
-# SIDEBAR NAVIGATION
+# SIDEBAR
 # ─────────────────────────────────────────
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg",
                  use_column_width=True)
@@ -91,11 +93,10 @@ if page == "🏠 Home":
     with col1:
         st.markdown('<div class="section-header">📌 About This System</div>', unsafe_allow_html=True)
         st.write("""
-        This system predicts the **juice yield (mL)** of a Calamansi fruit
+        This system predicts the **juice yield (mL)** of Calamansi fruits
         *(Citrus microcarpa)* using image processing and linear regression.
-        Instead of manually squeezing each fruit to measure juice,
-        this system analyzes a photo and automatically predicts how much
-        juice the fruit will produce.
+        The system can analyze a photo of **multiple fruits at once (10–20 pieces)**
+        and predict the total juice yield of the entire batch.
         """)
         st.markdown('<div class="section-header">🎯 Objectives</div>', unsafe_allow_html=True)
         st.write("**1.** Collect and process calamansi fruit images.")
@@ -110,24 +111,37 @@ if page == "🏠 Home":
         |------|--------|
         | Fruit | Calamansi *(Citrus microcarpa)* |
         | Input | Fruit image (JPG/PNG) |
-        | Output | Juice yield in mL |
+        | Fruits per photo | 1 to 20 pieces |
+        | Output | Juice yield in mL per fruit + total |
         | Model | Linear Regression |
         | Features | Shape + Color |
         """)
 
     st.divider()
+    st.markdown('<div class="section-header">📷 How to Take a Good Photo</div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown('<div class="step-box">☀️ <b>Lighting</b><br>Use bright, even lighting. Avoid shadows.</div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown('<div class="step-box">⬜ <b>Background</b><br>Place fruits on a plain white surface.</div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown('<div class="step-box">📏 <b>Spacing</b><br>Space fruits apart so they do not touch each other.</div>', unsafe_allow_html=True)
+    with c4:
+        st.markdown('<div class="step-box">📸 <b>Angle</b><br>Shoot from directly above (top-down view).</div>', unsafe_allow_html=True)
+
+    st.divider()
     st.markdown('<div class="section-header">⚙️ How the System Works</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown('<div class="step-box">📷 <b>Step 1</b><br>Upload calamansi image</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">📷 <b>Step 1</b><br>Upload photo of 1–20 calamansi fruits</div>', unsafe_allow_html=True)
     with c2:
-        st.markdown('<div class="step-box">🔧 <b>Step 2</b><br>Preprocess & segment fruit</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">🔧 <b>Step 2</b><br>Detect and segment each fruit individually</div>', unsafe_allow_html=True)
     with c3:
-        st.markdown('<div class="step-box">📐 <b>Step 3</b><br>Extract shape & color features</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">📐 <b>Step 3</b><br>Extract shape & color features per fruit</div>', unsafe_allow_html=True)
     with c4:
-        st.markdown('<div class="step-box">📈 <b>Step 4</b><br>Apply linear regression model</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">📈 <b>Step 4</b><br>Apply linear regression to each fruit</div>', unsafe_allow_html=True)
     with c5:
-        st.markdown('<div class="step-box">🍋 <b>Step 5</b><br>Display predicted juice yield</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">🍋 <b>Step 5</b><br>Show yield per fruit and total yield</div>', unsafe_allow_html=True)
 
     st.divider()
     st.markdown('<div class="section-header">🔬 Image Features Extracted</div>', unsafe_allow_html=True)
@@ -151,11 +165,11 @@ if page == "🏠 Home":
 # ══════════════════════════════════════════════════════
 elif page == "🔍 Predict Juice Yield":
     st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Upload a calamansi image to get the predicted juice yield</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Upload a photo of 1 to 20 calamansi fruits — make sure fruits are spaced apart and not touching</div>', unsafe_allow_html=True)
     st.divider()
 
     if not model_loaded:
-        st.error("❌ Model not found. Please run **train_model.py** first before using this page.")
+        st.error("❌ Model not found. Please run **train_model.py** first.")
         st.stop()
 
     uploaded_file = st.file_uploader(
@@ -167,63 +181,103 @@ elif page == "🔍 Predict Juice Yield":
         pil_image = Image.open(uploaded_file).convert('RGB')
         img_array = np.array(pil_image)
 
+        with st.spinner("🔍 Detecting and processing fruits..."):
+            all_features, contours, mask, img_blur = extract_features_from_array(img_array)
+
+        if not all_features:
+            st.error("❌ No fruits detected. Please use a clearer image with a plain white background and good lighting.")
+            st.stop()
+
+        fruit_count = len(all_features)
+
+        # ── Draw bounding boxes around each detected fruit ──
+        annotated = img_blur.copy()
+        for i, cnt in enumerate(contours):
+            x, y, w, h = cv2.boundingRect(cnt)
+            # Add padding around each fruit
+            padding = 10
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(img_blur.shape[1] - x, w + 2 * padding)
+            h = min(img_blur.shape[0] - y, h + 2 * padding)
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), (22, 163, 74), 2)
+            cv2.putText(annotated, f"#{i+1}", (x + 4, y + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (22, 163, 74), 2)
+
         col1, col2 = st.columns(2)
         with col1:
             st.markdown('<div class="section-header">📷 Original Image</div>', unsafe_allow_html=True)
             st.image(pil_image, use_column_width=True)
 
-        with st.spinner("🔍 Processing image..."):
-            features, mask = extract_features_from_array(img_array)
-
-        if features is None:
-            st.error("❌ Fruit not detected. Please use a clearer image with a plain background and good lighting.")
-            st.stop()
-
-        segmented = cv2.bitwise_and(img_array, img_array, mask=mask)
         with col2:
-            st.markdown('<div class="section-header">🔬 Segmented Fruit</div>', unsafe_allow_html=True)
-            st.image(segmented, use_column_width=True)
+            st.markdown(f'<div class="section-header">🔬 Detected Fruits ({fruit_count} found)</div>', unsafe_allow_html=True)
+            st.image(annotated, use_column_width=True)
+
+        # Warn if fruits may be touching
+        if fruit_count == 1 and len(cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]) > 1:
+            st.markdown("""
+            <div class="warning-box">
+            ⚠️ <b>Some fruits may be touching.</b> For accurate results, 
+            make sure fruits are spaced apart from each other before taking the photo.
+            </div>
+            """, unsafe_allow_html=True)
 
         st.divider()
 
-        X_new           = np.array([[features[f] for f in FEATURE_COLS]])
-        X_new_sc        = scaler.transform(X_new)
-        predicted_yield = model.predict(X_new_sc)[0]
+        # ── Predict each fruit ──
+        predictions = []
+        for features in all_features:
+            X_new    = np.array([[features[f] for f in FEATURE_COLS]])
+            X_new_sc = scaler.transform(X_new)
+            predicted = model.predict(X_new_sc)[0]
+            predictions.append(predicted)
 
-        st.markdown('<div class="section-header">📊 Prediction Result</div>', unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="result-box">
-            <h2 style="color:#166534; margin:0;">Predicted Juice Yield</h2>
-            <h1 style="color:#16a34a; font-size:52px; margin:8px 0;">{predicted_yield:.2f} mL</h1>
-            <p style="color:#6b7280; margin:0;">Based on image features extracted using OpenCV</p>
-        </div>
-        """, unsafe_allow_html=True)
+        total_yield = sum(predictions)
+
+        # ── Summary metrics ──
+        st.markdown('<div class="section-header">📊 Prediction Results</div>', unsafe_allow_html=True)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🍊 Fruits Detected", f"{fruit_count} fruits")
+        c2.metric("💧 Total Juice Yield", f"{total_yield:.2f} mL")
+        c3.metric("📊 Average per Fruit", f"{total_yield/fruit_count:.2f} mL")
 
         st.divider()
-        st.markdown('<div class="section-header">🧪 Extracted Image Features</div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Shape Features**")
-            st.table(pd.DataFrame({
-                "Feature": ["Area (cm²)", "Diameter (cm)", "Perimeter (cm)", "Circularity", "Estimated Volume (cm³)"],
-                "Value": [
-                    f"{features['area_cm2']:.4f}",
-                    f"{features['diameter_cm']:.4f}",
-                    f"{features['perimeter_cm']:.4f}",
-                    f"{features['circularity']:.4f}",
-                    f"{features['estimated_volume_cm3']:.4f}",
-                ]
-            }))
-        with col2:
-            st.markdown("**Color Features**")
-            st.table(pd.DataFrame({
-                "Feature": ["Mean Hue", "Mean Saturation", "Mean Brightness"],
-                "Value": [
-                    f"{features['mean_hue']:.2f}",
-                    f"{features['mean_saturation']:.2f}",
-                    f"{features['mean_value']:.2f}",
-                ]
-            }))
+
+        # ── Per fruit breakdown ──
+        st.markdown('<div class="section-header">🍋 Juice Yield Per Fruit</div>', unsafe_allow_html=True)
+
+        fruit_table = pd.DataFrame({
+            "Fruit": [f"Fruit #{i+1}" for i in range(fruit_count)],
+            "Predicted Juice Yield (mL)": [f"{p:.2f}" for p in predictions],
+            "Diameter (cm)": [f"{all_features[i]['diameter_cm']:.3f}" for i in range(fruit_count)],
+            "Area (cm²)": [f"{all_features[i]['area_cm2']:.3f}" for i in range(fruit_count)],
+            "Estimated Volume (cm³)": [f"{all_features[i]['estimated_volume_cm3']:.3f}" for i in range(fruit_count)],
+        })
+        st.dataframe(fruit_table, use_container_width=True, hide_index=True)
+
+        # ── Bar chart of individual yields ──
+        st.divider()
+        st.markdown('<div class="section-header">📈 Juice Yield per Fruit (Chart)</div>', unsafe_allow_html=True)
+
+        fig, ax = plt.subplots(figsize=(max(6, fruit_count * 0.7), 4))
+        bars = ax.bar(
+            [f"#{i+1}" for i in range(fruit_count)],
+            predictions,
+            color='#16a34a',
+            edgecolor='white'
+        )
+        ax.axhline(total_yield / fruit_count, color='red', linestyle='--', lw=1.5,
+                   label=f'Average = {total_yield/fruit_count:.2f} mL')
+        ax.set_xlabel('Fruit')
+        ax.set_ylabel('Predicted Juice Yield (mL)')
+        ax.set_title(f'Juice Yield per Fruit — Total: {total_yield:.2f} mL')
+        ax.legend()
+        for bar, val in zip(bars, predictions):
+            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.05,
+                    f'{val:.2f}', ha='center', fontsize=9)
+        plt.tight_layout()
+        st.pyplot(fig)
 
 
 # ══════════════════════════════════════════════════════
@@ -261,7 +315,6 @@ elif page == "📊 Model Performance":
 
     st.divider()
 
-    # Actual vs Predicted + Residuals
     st.markdown('<div class="section-header">📈 Actual vs Predicted & Residual Analysis</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
 
@@ -294,7 +347,6 @@ elif page == "📊 Model Performance":
 
     st.divider()
 
-    # Heatmap + Coefficients
     st.markdown('<div class="section-header">🔥 Correlation Heatmap & Feature Coefficients</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
 
@@ -329,7 +381,6 @@ elif page == "📊 Model Performance":
 
     st.divider()
 
-    # Cross Validation
     st.markdown('<div class="section-header">🔁 5-Fold Cross Validation</div>', unsafe_allow_html=True)
     with st.spinner("Running cross validation..."):
         kf     = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -357,7 +408,6 @@ elif page == "📊 Model Performance":
 
     st.divider()
 
-    # Regression Equation
     st.markdown('<div class="section-header">📝 Linear Regression Equation</div>', unsafe_allow_html=True)
     equation = f"juice_ml = {model.intercept_:.4f}"
     for feat, coef in zip(FEATURE_COLS, model.coef_):
