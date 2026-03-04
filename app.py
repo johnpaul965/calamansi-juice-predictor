@@ -12,9 +12,6 @@ from sklearn.model_selection import cross_val_score, KFold
 
 from feature_extraction import extract_features_from_array, FEATURE_COLS
 
-# ─────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────
 st.set_page_config(
     page_title="Calamansi Juice Yield Prediction System",
     page_icon="🍋",
@@ -54,9 +51,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────
-# LOAD MODEL
-# ─────────────────────────────────────────
 @st.cache_resource
 def load_model():
     model  = joblib.load('juice_yield_model.pkl')
@@ -67,11 +61,8 @@ model_loaded = os.path.exists('juice_yield_model.pkl') and os.path.exists('scale
 if model_loaded:
     model, scaler = load_model()
 
-# ─────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg",
-                 use_column_width=True)
+                 use_container_width=True)
 st.sidebar.markdown("## 🍋 Navigation")
 page = st.sidebar.radio("Go to", ["🏠 Home", "🔍 Predict Juice Yield", "📊 Model Performance"])
 st.sidebar.markdown("---")
@@ -190,11 +181,9 @@ elif page == "🔍 Predict Juice Yield":
 
         fruit_count = len(all_features)
 
-        # ── Draw bounding boxes around each detected fruit ──
         annotated = img_blur.copy()
         for i, cnt in enumerate(contours):
             x, y, w, h = cv2.boundingRect(cnt)
-            # Add padding around each fruit
             padding = 10
             x = max(0, x - padding)
             y = max(0, y - padding)
@@ -207,24 +196,21 @@ elif page == "🔍 Predict Juice Yield":
         col1, col2 = st.columns(2)
         with col1:
             st.markdown('<div class="section-header">📷 Original Image</div>', unsafe_allow_html=True)
-            st.image(pil_image, use_column_width=True)
-
+            st.image(pil_image, use_container_width=True)
         with col2:
             st.markdown(f'<div class="section-header">🔬 Detected Fruits ({fruit_count} found)</div>', unsafe_allow_html=True)
-            st.image(annotated, use_column_width=True)
+            st.image(annotated, use_container_width=True)
 
-        # Warn if fruits may be touching
         if fruit_count == 1 and len(cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]) > 1:
             st.markdown("""
             <div class="warning-box">
-            ⚠️ <b>Some fruits may be touching.</b> For accurate results, 
+            ⚠️ <b>Some fruits may be touching.</b> For accurate results,
             make sure fruits are spaced apart from each other before taking the photo.
             </div>
             """, unsafe_allow_html=True)
 
         st.divider()
 
-        # ── Predict each fruit ──
         predictions = []
         for features in all_features:
             X_new    = np.array([[features[f] for f in FEATURE_COLS]])
@@ -234,9 +220,7 @@ elif page == "🔍 Predict Juice Yield":
 
         total_yield = sum(predictions)
 
-        # ── Summary metrics ──
         st.markdown('<div class="section-header">📊 Prediction Results</div>', unsafe_allow_html=True)
-
         c1, c2, c3 = st.columns(3)
         c1.metric("🍊 Fruits Detected", f"{fruit_count} fruits")
         c2.metric("💧 Total Juice Yield", f"{total_yield:.2f} mL")
@@ -244,9 +228,7 @@ elif page == "🔍 Predict Juice Yield":
 
         st.divider()
 
-        # ── Per fruit breakdown ──
         st.markdown('<div class="section-header">🍋 Juice Yield Per Fruit</div>', unsafe_allow_html=True)
-
         fruit_table = pd.DataFrame({
             "Fruit": [f"Fruit #{i+1}" for i in range(fruit_count)],
             "Predicted Juice Yield (mL)": [f"{p:.2f}" for p in predictions],
@@ -256,17 +238,10 @@ elif page == "🔍 Predict Juice Yield":
         })
         st.dataframe(fruit_table, use_container_width=True, hide_index=True)
 
-        # ── Bar chart of individual yields ──
         st.divider()
         st.markdown('<div class="section-header">📈 Juice Yield per Fruit (Chart)</div>', unsafe_allow_html=True)
-
         fig, ax = plt.subplots(figsize=(max(6, fruit_count * 0.7), 4))
-        bars = ax.bar(
-            [f"#{i+1}" for i in range(fruit_count)],
-            predictions,
-            color='#16a34a',
-            edgecolor='white'
-        )
+        bars = ax.bar([f"#{i+1}" for i in range(fruit_count)], predictions, color='#16a34a', edgecolor='white')
         ax.axhline(total_yield / fruit_count, color='red', linestyle='--', lw=1.5,
                    label=f'Average = {total_yield/fruit_count:.2f} mL')
         ax.set_xlabel('Fruit')
@@ -274,8 +249,7 @@ elif page == "🔍 Predict Juice Yield":
         ax.set_title(f'Juice Yield per Fruit — Total: {total_yield:.2f} mL')
         ax.legend()
         for bar, val in zip(bars, predictions):
-            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.05,
-                    f'{val:.2f}', ha='center', fontsize=9)
+            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.05, f'{val:.2f}', ha='center', fontsize=9)
         plt.tight_layout()
         st.pyplot(fig)
 
@@ -317,7 +291,6 @@ elif page == "📊 Model Performance":
 
     st.markdown('<div class="section-header">📈 Actual vs Predicted & Residual Analysis</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
-
     with col1:
         fig1, ax1 = plt.subplots(figsize=(6, 5))
         ax1.scatter(y, y_pred, color='steelblue', alpha=0.7, edgecolors='white', s=60)
@@ -328,12 +301,10 @@ elif page == "📊 Model Performance":
         ax1.set_ylabel('Predicted Juice Yield (mL)')
         ax1.set_title('Actual vs Predicted')
         ax1.legend()
-        ax1.text(0.05, 0.92, f'R² = {r2:.4f}', transform=ax1.transAxes,
-                 fontsize=10, color='darkred',
+        ax1.text(0.05, 0.92, f'R² = {r2:.4f}', transform=ax1.transAxes, fontsize=10, color='darkred',
                  bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
         plt.tight_layout()
         st.pyplot(fig1)
-
     with col2:
         residuals = y - y_pred
         fig2, ax2 = plt.subplots(figsize=(6, 5))
@@ -349,7 +320,6 @@ elif page == "📊 Model Performance":
 
     st.markdown('<div class="section-header">🔥 Correlation Heatmap & Feature Coefficients</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
-
     with col1:
         fig3, ax3 = plt.subplots(figsize=(7, 6))
         corr_matrix = df[FEATURE_COLS + ['juice_ml']].corr()
@@ -360,11 +330,8 @@ elif page == "📊 Model Performance":
         ax3.set_title('Feature Correlation Heatmap')
         plt.tight_layout()
         st.pyplot(fig3)
-
     with col2:
-        coef_df = pd.DataFrame({
-            'Feature': FEATURE_COLS, 'Coefficient': model.coef_
-        }).sort_values('Coefficient', ascending=True)
+        coef_df = pd.DataFrame({'Feature': FEATURE_COLS, 'Coefficient': model.coef_}).sort_values('Coefficient', ascending=True)
         colors = ['#d73027' if c < 0 else '#1a9850' for c in coef_df['Coefficient']]
         fig4, ax4 = plt.subplots(figsize=(7, 6))
         bars = ax4.barh(coef_df['Feature'], coef_df['Coefficient'], color=colors, edgecolor='white')
@@ -372,10 +339,8 @@ elif page == "📊 Model Performance":
         ax4.set_xlabel('Coefficient Value')
         ax4.set_title('Linear Regression — Feature Coefficients')
         for bar, val in zip(bars, coef_df['Coefficient']):
-            ax4.text(val + (0.005 if val >= 0 else -0.005),
-                     bar.get_y() + bar.get_height() / 2,
-                     f'{val:.3f}', va='center',
-                     ha='left' if val >= 0 else 'right', fontsize=9)
+            ax4.text(val + (0.005 if val >= 0 else -0.005), bar.get_y() + bar.get_height() / 2,
+                     f'{val:.3f}', va='center', ha='left' if val >= 0 else 'right', fontsize=9)
         plt.tight_layout()
         st.pyplot(fig4)
 
@@ -395,8 +360,7 @@ elif page == "📊 Model Performance":
         folds = [f'Fold {i+1}' for i in range(5)]
         fig5, ax5 = plt.subplots(figsize=(6, 4))
         ax5.bar(folds, cv_r2, color='steelblue', edgecolor='white')
-        ax5.axhline(cv_r2.mean(), color='red', linestyle='--', lw=2,
-                    label=f'Mean R² = {cv_r2.mean():.4f}')
+        ax5.axhline(cv_r2.mean(), color='red', linestyle='--', lw=2, label=f'Mean R² = {cv_r2.mean():.4f}')
         ax5.set_ylim(0, 1.05)
         ax5.set_ylabel('R² Score')
         ax5.set_title('5-Fold Cross Validation R² Scores')
