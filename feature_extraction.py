@@ -6,7 +6,7 @@ import numpy as np
 # Used by: train_model.py, evaluate_model.py, app.py
 # ─────────────────────────────────────────
 
-PIXELS_PER_CM = 41.0  # Change this based on your camera calibration
+PIXELS_PER_CM = 41.0  # Calibrated from ruler photo
 
 FEATURE_COLS = [
     'area_cm2',
@@ -18,6 +18,8 @@ FEATURE_COLS = [
     'mean_saturation',
     'mean_value'
 ]
+
+MIN_FRUIT_AREA_PX = 800
 
 
 def preprocess_image(image_path):
@@ -58,19 +60,17 @@ def segment_fruit(img_blur):
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
     return mask, hsv
 
-def compute_features(img_blur, mask, hsv, pixels_per_cm=PIXELS_PER_CM):
-    """Extract shape and color features from segmented fruit."""
+
+def compute_features_single(cnt, mask, hsv, pixels_per_cm=PIXELS_PER_CM):
+    """Extract features from a single fruit contour."""
     features = {}
 
-    # SHAPE FEATURES
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-
-    cnt          = max(contours, key=cv2.contourArea)
     area_px      = cv2.contourArea(cnt)
     perimeter_px = cv2.arcLength(cnt, True)
     (cx, cy), radius_px = cv2.minEnclosingCircle(cnt)
+
+    single_mask = np.zeros_like(mask)
+    cv2.drawContours(single_mask, [cnt], -1, 255, -1)
 
     area_cm2    = area_px / (pixels_per_cm ** 2)
     diameter_cm = (2 * radius_px) / pixels_per_cm
@@ -81,8 +81,7 @@ def compute_features(img_blur, mask, hsv, pixels_per_cm=PIXELS_PER_CM):
     features['circularity']          = (4 * np.pi * area_px) / (perimeter_px ** 2 + 1e-5)
     features['estimated_volume_cm3'] = (4/3) * np.pi * (diameter_cm / 2) ** 3
 
-    # COLOR FEATURES
-    fruit_pixels = hsv[mask > 0]
+    fruit_pixels = hsv[single_mask > 0]
     if len(fruit_pixels) == 0:
         return None
 
@@ -93,20 +92,45 @@ def compute_features(img_blur, mask, hsv, pixels_per_cm=PIXELS_PER_CM):
     return features
 
 
+def extract_all_fruits(img_blur, mask, hsv, pixels_per_cm=PIXELS_PER_CM):
+    """
+    Detect ALL fruits in the image.
+    Returns a list of features (one dict per fruit) and their contours.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    fruit_contours = [c for c in contours if cv2.contourArea(c) > MIN_FRUIT_AREA_PX]
+
+    all_features   = []
+    valid_contours = []
+
+    for cnt in fruit_contours:
+        features = compute_features_single(cnt, mask, hsv, pixels_per_cm)
+        if features is not None:
+            all_features.append(features)
+            valid_contours.append(cnt)
+
+    return all_features, valid_contours
+
+
+# ── For training (single fruit per image) ──
 def extract_features_from_path(image_path, pixels_per_cm=PIXELS_PER_CM):
-    """Full pipeline from image file path."""
+    """Used by train_model.py — single fruit per training image."""
     img_blur = preprocess_image(image_path)
     if img_blur is None:
-        print(f"Could not read: {image_path}")
         return None
-    mask, hsv = segment_fruit(img_blur)
-    features  = compute_features(img_blur, mask, hsv, pixels_per_cm)
+    mask, hsv   = segment_fruit(img_blur)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    cnt      = max(contours, key=cv2.contourArea)
+    features = compute_features_single(cnt, mask, hsv, pixels_per_cm)
     return features
 
 
+# ── For the app (multiple fruits per image) ──
 def extract_features_from_array(image_array, pixels_per_cm=PIXELS_PER_CM):
-    """Full pipeline from numpy array (Streamlit upload)."""
-    img_blur  = preprocess_array(image_array)
-    mask, hsv = segment_fruit(img_blur)
-    features  = compute_features(img_blur, mask, hsv, pixels_per_cm)
-    return features, mask
+    """Used by app.py — detects ALL fruits in the uploaded image."""
+    img_blur            = preprocess_array(image_array)
+    mask, hsv           = segment_fruit(img_blur)
+    all_features, contours = extract_all_fruits(img_blur, mask, hsv, pixels_per_cm)
+    return all_features, contours, mask, img_blur
