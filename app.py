@@ -201,13 +201,7 @@ elif page == "🔍 Predict Juice Yield":
             st.markdown(f'<div class="section-header">🔬 Detected Fruits ({fruit_count} found)</div>', unsafe_allow_html=True)
             st.image(annotated, use_container_width=True)
 
-        if fruit_count == 1 and len(cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]) > 1:
-            st.markdown("""
-            <div class="warning-box">
-            ⚠️ <b>Some fruits may be touching.</b> For accurate results,
-            make sure fruits are spaced apart from each other before taking the photo.
-            </div>
-            """, unsafe_allow_html=True)
+
 
         st.divider()
 
