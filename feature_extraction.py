@@ -6,7 +6,7 @@ import numpy as np
 # Used by: train_model.py, evaluate_model.py, app.py
 # ─────────────────────────────────────────
 
-PIXELS_PER_CM = 37.8  # Change this based on your camera calibration
+PIXELS_PER_CM = 41.0  # Change this based on your camera calibration
 
 FEATURE_COLS = [
     'area_cm2',
