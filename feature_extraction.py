@@ -7,7 +7,7 @@ import numpy as np
 # ─────────────────────────────────────────
 
 PIXELS_PER_CM     = 41.0
-MIN_FRUIT_AREA_PX = 400
+MIN_FRUIT_AREA_PX = 50
 MIN_CIRCULARITY   = 0.2   # fruits are roughly circular
 
 FEATURE_COLS = [
