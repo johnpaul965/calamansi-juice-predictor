@@ -313,7 +313,7 @@ elif page == "🔍 Predict Juice Yield":
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown('<div class="section-header">📷 Top View (Best Frame)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-header">📷 Top View Photo</div>', unsafe_allow_html=True)
             st.image(result['img_blur'], width='stretch')
         with col2:
             st.markdown(f'<div class="section-header">🔬 Detected ({result["hough_count"]} visible)</div>', unsafe_allow_html=True)
