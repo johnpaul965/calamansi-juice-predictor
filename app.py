@@ -311,11 +311,15 @@ elif page == "🔍 Predict Juice Yield":
             result['basket_contour'], result['hough_circles']
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown('<div class="section-header">📷 Top View Photo</div>', unsafe_allow_html=True)
-            st.image(result['img_blur'], width='stretch')
-        with col2:
+        # Show all 3: top photo, side photo, annotated detection
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown('<div class="section-header">📷 Top View</div>', unsafe_allow_html=True)
+            st.image(Image.open(top_photo), width='stretch')
+        with c2:
+            st.markdown('<div class="section-header">📷 Side View</div>', unsafe_allow_html=True)
+            st.image(Image.open(side_photo), width='stretch')
+        with c3:
             st.markdown(f'<div class="section-header">🔬 Detected ({result["hough_count"]} visible)</div>', unsafe_allow_html=True)
             st.image(annotated, width='stretch')
 
