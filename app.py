@@ -177,7 +177,9 @@ def show_results(all_features, predictions, estimated_total, pixels_per_cm, coin
 
 
 def process_video(uploaded_video):
-    """Process video, return best frame results."""
+    """Process video using 3D-aware pipeline (top + side frames)."""
+    from feature_extraction import process_video_frames
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
         tmp.write(uploaded_video.read())
         tmp_path = tmp.name
@@ -190,58 +192,52 @@ def process_video(uploaded_video):
         cap.release(); os.unlink(tmp_path)
         return None, "❌ Could not read video. Try MP4 format."
 
-    frame_indices = list(range(0, total_frames, max(1, int(fps))))[:10]
-    st.info(f"📹 {total_frames} frames at {fps:.0f} fps — analyzing {len(frame_indices)} frames")
+    # Sample up to 15 frames across the video
+    frame_indices = list(range(0, total_frames, max(1, int(fps))))[:15]
+    st.info(f"📹 {total_frames} frames at {fps:.0f} fps — analyzing {len(frame_indices)} frames for top + side views")
 
-    progress     = st.progress(0, text="Analyzing video...")
-    frame_results = []
-    best_frame    = None
-    best_count    = 0
+    progress   = st.progress(0, text="Analyzing video...")
+    frames_rgb = []
 
     for idx, frame_no in enumerate(frame_indices):
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
         ret, frame = cap.read()
-        if not ret:
-            continue
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        all_features, contours, mask, img_blur, pixels_per_cm, \
-            coin_contour, basket_contour, estimated_total = \
-            extract_features_from_array(frame_rgb)
-
-        if all_features:
-            preds = predict_from_features(all_features)
-            frame_results.append({
-                'features':        all_features,
-                'predictions':     preds,
-                'pixels_per_cm':   pixels_per_cm,
-                'coin_contour':    coin_contour,
-                'basket_contour':  basket_contour,
-                'img_blur':        img_blur,
-                'contours':        contours,
-                'estimated_total': estimated_total,
-            })
-            if len(all_features) > best_count:
-                best_count = len(all_features)
-                best_frame = frame_results[-1]
-
-        progress.progress((idx+1)/len(frame_indices), text=f"Frame {idx+1}/{len(frame_indices)}...")
+        if ret:
+            frames_rgb.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        progress.progress((idx+1)/len(frame_indices), text=f"Loading frame {idx+1}/{len(frame_indices)}...")
 
     cap.release(); os.unlink(tmp_path); progress.empty()
 
-    if not frame_results:
+    if not frames_rgb:
+        return None, "❌ Could not read video frames."
+
+    with st.spinner("🔬 Running 3D analysis across all frames..."):
+        result = process_video_frames(frames_rgb)
+
+    if result is None or not result['features']:
         return None, "❌ No calamansi detected. Check lighting and make sure fruits and coin are visible."
 
-    # Average predictions across frames with same best count
-    same = [f for f in frame_results if len(f['predictions']) == best_count]
-    avg_preds = [np.mean([f['predictions'][i] for f in same]) for i in range(best_count)]
-    # Use median estimated total across all frames
-    med_total = max(int(np.median([f['estimated_total'] for f in frame_results])), best_count)
+    # Add predictions
+    result['predictions'] = predict_from_features(result['features'])
 
-    best_frame['predictions']     = avg_preds
-    best_frame['estimated_total'] = med_total
+    # Show analysis summary
+    method = result['method']
+    top_f  = result['top_frames']
+    side_f = result['side_frames']
+    est    = result['estimated_total']
+    visible = len(result['features'])
 
-    st.success(f"✅ Analyzed {len(frame_results)} frames — {best_count} visible fruits, ~{med_total} estimated total")
-    return best_frame, None
+    if side_f > 0:
+        st.success(f"✅ 3D Analysis complete — {top_f} top frames + {side_f} side frames → ~{est} estimated fruits")
+        cols = st.columns(3)
+        cols[0].metric("📐 Basket Width",  f"{result['width_cm']:.1f} cm")
+        cols[1].metric("📐 Basket Length", f"{result['length_cm']:.1f} cm")
+        cols[2].metric("📐 Fill Height",   f"{result['height_cm']:.1f} cm")
+    else:
+        st.success(f"✅ Analyzed {top_f} top frames — {visible} visible fruits, ~{est} estimated total")
+        st.info("💡 **Tip:** For more accurate counting, tilt the camera to show the side of the basket in the same video. The system will use 3D volume to estimate the total count.")
+
+    return result, None
 
 
 # ══════════════════════════════════════════════════════
@@ -351,12 +347,14 @@ elif page == "🔍 Predict Juice Yield":
         st.stop()
 
     st.markdown("""
-    **How to record:**
-    1. Place calamansi fruits in a basket or container
-    2. Put a **1-peso coin beside the basket** — keep it visible in every frame
-    3. Record **3–10 seconds** from directly above (top-down view)
-    4. Upload the video below
+    **How to record for best accuracy:**
+    1. Place calamansi in a basket or container
+    2. Put a **1-peso coin beside the basket** — keep it visible throughout
+    3. **Top-down view (3–5 sec):** Hold camera directly above the basket
+    4. **Side view (2–3 sec):** Tilt camera to show the side/height of the basket
+    5. Upload the video — system detects both views automatically
     """)
+    st.info("📐 **3D Mode:** If side view is detected, the system calculates basket volume (width × length × height) for a more accurate total fruit count.")
 
     uploaded_video = st.file_uploader("📹 Upload video (MP4, MOV, AVI)", type=['mp4','mov','avi','m4v'])
 
