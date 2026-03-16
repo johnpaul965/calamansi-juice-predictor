@@ -1,496 +1,353 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
-import joblib
-import os
 import cv2
-import tempfile
-import matplotlib.pyplot as plt
-import seaborn as sns
-from PIL import Image
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import cross_val_score, KFold
+import numpy as np
 
-from feature_extraction import extract_features_from_array, FEATURE_COLS
+# ─────────────────────────────────────────
+# FEATURE EXTRACTION MODULE
+# Development of an Image-Based System for Predicting
+# Calamansi (Citrus microcarpa) Juice Yield Using Linear Regression
+# ─────────────────────────────────────────
 
-st.set_page_config(
-    page_title="Calamansi Juice Yield Prediction System",
-    page_icon="🍋",
-    layout="wide"
-)
+PIXELS_PER_CM   = 41.0
+AVG_CALAMANSI_D = 2.5    # average calamansi diameter in cm
+MIN_CIRCULARITY = 0.25
+MIN_DIAMETER_CM = 1.5
+MAX_DIAMETER_CM = 5.5
 
-st.markdown("""
-<style>
-    .main-title { font-size:36px; font-weight:bold; color:#166534; text-align:center; }
-    .sub-title  { font-size:16px; color:#6b7280; text-align:center; margin-bottom:10px; }
-    .section-header {
-        font-size:20px; font-weight:bold; color:#166534;
-        border-bottom:2px solid #16a34a;
-        padding-bottom:6px; margin-top:20px; margin-bottom:10px;
-    }
-    .step-box {
-        background-color:#fefce8; border:1px solid #fde68a;
-        border-radius:10px; padding:14px 18px; margin-bottom:10px;
-    }
-    .detect-box {
-        background-color:#f0fdf4; border-left:5px solid #16a34a;
-        border-radius:8px; padding:16px; margin-bottom:16px;
-    }
-    .total-box {
-        background-color:#166534; border-radius:12px;
-        padding:20px; margin:16px 0; text-align:center;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-@st.cache_resource
-def load_model():
-    return joblib.load('juice_yield_model.pkl'), joblib.load('scaler.pkl')
-
-model_loaded = os.path.exists('juice_yield_model.pkl') and os.path.exists('scaler.pkl')
-if model_loaded:
-    model, scaler = load_model()
-
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg", width='stretch')
-st.sidebar.markdown("## 🍋 Navigation")
-page = st.sidebar.radio("Go to", ["🏠 Home", "🔍 Predict Juice Yield", "📊 Model Performance"])
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Capstone Project**")
-st.sidebar.markdown("Image-Based System for Predicting Calamansi Juice Yield Using Linear Regression")
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Model Status:** {'✅ Loaded' if model_loaded else '❌ Not found — run train_model.py'}")
+FEATURE_COLS = [
+    'area_cm2', 'diameter_cm', 'perimeter_cm', 'circularity',
+    'estimated_volume_cm3', 'mean_hue', 'mean_saturation', 'mean_value'
+]
 
 
-# ══════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════
+# ─────────────────────────────────────────
+# PREPROCESSING
+# ─────────────────────────────────────────
 
-def predict_from_features(all_features):
-    preds = []
-    for f in all_features:
-        X    = np.array([[f[col] for col in FEATURE_COLS]])
-        pred = model.predict(scaler.transform(X))[0]
-        preds.append(max(pred, 1.0))
-    return preds
+def _square_crop(image_array):
+    """Center-square crop to handle portrait/landscape uniformly."""
+    h, w = image_array.shape[:2]
+    s  = min(h, w)
+    y0 = (h - s) // 2
+    x0 = (w - s) // 2
+    return image_array[y0:y0+s, x0:x0+s]
+
+def preprocess_image(image_path):
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return cv2.GaussianBlur(cv2.resize(_square_crop(img_rgb), (512,512)), (5,5), 0)
+
+def preprocess_array(image_array):
+    return cv2.GaussianBlur(cv2.resize(_square_crop(image_array), (512,512)), (5,5), 0)
 
 
-def get_ripeness(all_features):
-    avg_hue = np.mean([f['mean_hue'] for f in all_features])
-    if avg_hue < 25:
-        return "🟠 Ripe Stage",    "#f97316", "Yellow-orange — fully ripe calamansi."
-    elif avg_hue < 50:
-        return "🟡 Turning Stage", "#eab308", "Partially yellow — between green and ripe."
+# ─────────────────────────────────────────
+# VIEW CLASSIFICATION
+# top view  = fruits fill upper portion of image
+# side view = fruits appear as a horizontal band in the middle
+# ─────────────────────────────────────────
+
+def classify_view(img_blur):
+    hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    mask = cv2.bitwise_or(
+        cv2.inRange(hsv, np.array([25,15,40]),  np.array([95,255,210])),
+        cv2.inRange(hsv, np.array([10,30,60]),  np.array([40,255,255]))
+    )
+    rows  = np.sum(mask, axis=1)
+    top   = float(rows[:256].sum())
+    bot   = float(rows[256:].sum())
+    ratio = top / (bot + 1)
+    return 'top' if ratio > 1.2 else 'side'
+
+
+# ─────────────────────────────────────────
+# FRUIT SEGMENTATION
+# ─────────────────────────────────────────
+
+def segment_fruit(img_blur):
+    hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    mask1 = cv2.inRange(hsv, np.array([25,15,40]),  np.array([95,255,210]))
+    mask2 = cv2.inRange(hsv, np.array([10,30,60]),  np.array([40,255,255]))
+    mask  = cv2.bitwise_or(mask1, mask2)
+    k     = np.ones((3,3), np.uint8)
+    mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+    return mask, hsv
+
+
+# ─────────────────────────────────────────
+# BASKET DETECTION
+# ─────────────────────────────────────────
+
+def detect_basket(img_blur):
+    gray  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(cv2.GaussianBlur(gray,(7,7),0), 30, 100)
+    edges = cv2.dilate(edges, np.ones((5,5),np.uint8), iterations=2)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_area    = img_blur.shape[0] * img_blur.shape[1]
+    best, best_area = None, 0
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < img_area * 0.05 or area > img_area * 0.95:
+            continue
+        if area > best_area:
+            best_area = area; best = cnt
+    return best, best_area
+
+
+# ─────────────────────────────────────────
+# HOUGH CIRCLE COUNTING
+# Counts visible fruits in one layer
+# ─────────────────────────────────────────
+
+def count_fruits_hough(img_blur, mask, avg_r_px=None):
+    gray_m = cv2.bitwise_and(cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY), mask)
+    if avg_r_px:
+        min_r = max(5,  int(avg_r_px * 0.6))
+        max_r = min(80, int(avg_r_px * 1.4))
     else:
-        return "🟢 Green Stage",   "#16a34a", "Dark green — unripe calamansi."
+        min_r, max_r = 8, 45
+    minD = max(min_r * 2, 10)
+    circles = cv2.HoughCircles(
+        gray_m, cv2.HOUGH_GRADIENT, dp=1.2,
+        minDist=minD, param1=50, param2=30,
+        minRadius=min_r, maxRadius=max_r
+    )
+    if circles is None:
+        return 0, []
+    circles = np.round(circles[0,:]).astype("int")
+    valid   = [(x,y,r) for x,y,r in circles
+               if 0<=y<mask.shape[0] and 0<=x<mask.shape[1] and mask[y,x]>0]
+    return len(valid), valid
 
 
-def annotate_image(img_blur, contours, coin_contour, basket_contour):
-    out = img_blur.copy()
-    if basket_contour is not None:
-        cv2.drawContours(out, [basket_contour], -1, (59, 130, 246), 2)
-    if coin_contour is not None:
-        cv2.drawContours(out, [coin_contour], -1, (234, 179, 8), 2)
-        M = cv2.moments(coin_contour)
-        if M["m00"] != 0:
-            cx, cy = int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"])
-            cv2.putText(out, "1P", (cx-10, cy+5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (234,179,8), 1)
-    for i, cnt in enumerate(contours):
-        x, y, w, h = cv2.boundingRect(cnt)
-        p = 6
-        x = max(0, x-p); y = max(0, y-p)
-        w = min(out.shape[1]-x, w+2*p); h = min(out.shape[0]-y, h+2*p)
-        cv2.rectangle(out, (x,y), (x+w,y+h), (22,163,74), 2)
-        cv2.putText(out, f"#{i+1}", (x+4, y+20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (22,163,74), 2)
-    return out
+# ─────────────────────────────────────────
+# LAYER DETECTION FROM SIDE VIEW
+# Measures how many fruit-diameters tall the stack is
+# ─────────────────────────────────────────
+
+def measure_layers_from_side(img_blur, avg_fruit_diameter_px):
+    """
+    From a side-view frame, measure how many layers of fruits are stacked.
+    Finds the fruit-colored vertical span and divides by avg fruit diameter.
+    """
+    hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    mask = cv2.bitwise_or(
+        cv2.inRange(hsv, np.array([25,15,40]),  np.array([95,255,210])),
+        cv2.inRange(hsv, np.array([10,30,60]),  np.array([40,255,255]))
+    )
+    rows      = np.sum(mask, axis=1)
+    threshold = rows.max() * 0.1
+    fruit_rows = np.where(rows > threshold)[0]
+
+    if len(fruit_rows) == 0 or avg_fruit_diameter_px <= 0:
+        return 1
+
+    height_px = fruit_rows[-1] - fruit_rows[0]
+    layers    = round(height_px / avg_fruit_diameter_px)
+    return max(1, layers)
 
 
-def show_results(all_features, predictions, estimated_total, pixels_per_cm, coin_contour, basket_contour):
-    visible     = len(predictions)
-    avg_juice   = sum(predictions) / visible
-    total_juice = avg_juice * estimated_total
+# ─────────────────────────────────────────
+# FEATURE COMPUTATION
+# ─────────────────────────────────────────
 
-    label, color, desc = get_ripeness(all_features)
-    coin_msg   = f"✅ 1-peso coin detected — {pixels_per_cm:.1f} px/cm" \
-                 if coin_contour is not None else \
-                 "⚠️ No coin detected — add 1-peso coin for accurate measurement"
-    basket_msg = "✅ Basket boundary detected" \
-                 if basket_contour is not None else \
-                 "⚠️ Basket boundary not detected — count based on visible fruits only"
+def compute_features(cnt, mask, hsv, ppc):
+    area_px  = cv2.contourArea(cnt)
+    peri_px  = cv2.arcLength(cnt, True)
+    (_, _), r = cv2.minEnclosingCircle(cnt)
+    single   = np.zeros_like(mask)
+    cv2.drawContours(single, [cnt], -1, 255, -1)
+    diam     = (2 * r) / ppc
+    px       = hsv[single > 0]
+    if len(px) == 0:
+        return None
+    return {
+        'area_cm2':             area_px / (ppc**2),
+        'diameter_cm':          diam,
+        'perimeter_cm':         peri_px / ppc,
+        'circularity':          (4*np.pi*area_px) / (peri_px**2 + 1e-5),
+        'estimated_volume_cm3': (4/3) * np.pi * (diam/2)**3,
+        'mean_hue':             np.mean(px[:,0]),
+        'mean_saturation':      np.mean(px[:,1]),
+        'mean_value':           np.mean(px[:,2]),
+    }
 
-    # Detection banner
-    st.markdown(f"""
-    <div class="detect-box">
-        <span style="font-size:22px;font-weight:bold;color:#166534;">🍋 Calamansi Detected</span>
-        &nbsp;<span style="font-size:14px;color:#6b7280;">Citrus microcarpa</span><br><br>
-        <span style="font-size:16px;font-weight:bold;color:{color};">{label}</span>
-        &nbsp;—&nbsp;<span style="font-size:14px;color:#6b7280;">{desc}</span><br>
-        <span style="font-size:13px;color:#6b7280;">🪙 {coin_msg}</span><br>
-        <span style="font-size:13px;color:#6b7280;">🧺 {basket_msg}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Metrics
-    st.markdown('<div class="section-header">📊 Prediction Results</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔬 Visible Fruits",       f"{visible} fruits",         help="Fruits detected in frame")
-    c2.metric("🧺 Estimated Total",       f"{estimated_total} fruits", help="Total including hidden fruits")
-    c3.metric("📊 Avg Juice per Fruit",   f"{avg_juice:.2f} mL",       help="Based on visible fruits")
-    c4.metric("💧 Total Juice Yield",     f"{total_juice:.2f} mL",     help="Avg × estimated total count")
-
-    # Big result
-    st.markdown(f"""
-    <div class="total-box">
-        <span style="font-size:16px;color:#bbf7d0;">🧺 Basket of {estimated_total} Calamansi Fruits</span><br>
-        <span style="font-size:40px;font-weight:bold;color:#ffffff;">💧 {total_juice:.2f} mL</span><br>
-        <span style="font-size:14px;color:#bbf7d0;">Estimated Total Juice Yield</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.divider()
-
-    # Per-fruit table
-    st.markdown(f'<div class="section-header">🍋 Visible Fruits Breakdown ({visible} detected)</div>', unsafe_allow_html=True)
-    st.dataframe(pd.DataFrame({
-        "Fruit":               [f"#{i+1}" for i in range(visible)],
-        "Predicted Juice (mL)":[f"{p:.2f}" for p in predictions],
-        "Diameter (cm)":       [f"{all_features[i]['diameter_cm']:.2f}" for i in range(visible)],
-        "Area (cm²)":          [f"{all_features[i]['area_cm2']:.2f}" for i in range(visible)],
-        "Ripeness":            [
-            "🟠 Ripe" if all_features[i]['mean_hue'] < 25
-            else "🟡 Turning" if all_features[i]['mean_hue'] < 50
-            else "🟢 Green"
-            for i in range(visible)
-        ],
-    }), width='stretch', hide_index=True)
-
-    st.divider()
-    st.markdown('<div class="section-header">📈 Juice Yield per Visible Fruit</div>', unsafe_allow_html=True)
-    fig, ax = plt.subplots(figsize=(max(6, visible * 0.7), 4))
-    bars = ax.bar([f"#{i+1}" for i in range(visible)], predictions, color='#16a34a', edgecolor='white')
-    ax.axhline(avg_juice, color='red', linestyle='--', lw=1.5, label=f'Avg = {avg_juice:.2f} mL')
-    ax.set_xlabel('Fruit'); ax.set_ylabel('Predicted Juice (mL)')
-    ax.set_title(f'Visible: {visible} fruits | Est. Total: {estimated_total} fruits | Total Juice: {total_juice:.2f} mL')
-    ax.legend()
-    for bar, val in zip(bars, predictions):
-        ax.text(bar.get_x()+bar.get_width()/2, val+0.05, f'{val:.2f}', ha='center', fontsize=9)
-    plt.tight_layout(); st.pyplot(fig)
+def is_calamansi(cnt, ppc):
+    area = cv2.contourArea(cnt)
+    if area < 50: return False
+    peri = cv2.arcLength(cnt, True)
+    if peri == 0: return False
+    if (4*np.pi*area)/(peri**2) < MIN_CIRCULARITY: return False
+    (_, _), r = cv2.minEnclosingCircle(cnt)
+    d = (2*r)/ppc
+    return MIN_DIAMETER_CM <= d <= MAX_DIAMETER_CM
 
 
-def process_video(uploaded_video):
-    """Process video using 3D-aware pipeline (top + side frames)."""
-    from feature_extraction import process_video_frames
+# ─────────────────────────────────────────
+# PER-FRUIT FEATURES (watershed)
+# ─────────────────────────────────────────
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-        tmp.write(uploaded_video.read())
-        tmp_path = tmp.name
+def get_fruit_features(img_blur, mask, hsv, ppc):
+    dist       = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    dist_norm  = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, sure_fg = cv2.threshold(dist_norm, 0.4*dist_norm.max(), 255, 0)
+    sure_fg    = np.uint8(sure_fg)
+    sure_bg    = cv2.dilate(mask, np.ones((3,3),np.uint8), iterations=3)
+    unknown    = cv2.subtract(sure_bg, sure_fg)
+    _, markers = cv2.connectedComponents(sure_fg)
+    markers    = markers + 1; markers[unknown==255] = 0
+    markers    = cv2.watershed(cv2.cvtColor(img_blur, cv2.COLOR_RGB2BGR), markers)
+    feats, cnts = [], []
+    for label in np.unique(markers):
+        if label <= 1: continue
+        seg = np.zeros(mask.shape, dtype=np.uint8)
+        seg[markers==label] = 255
+        seg = cv2.bitwise_and(seg, mask)
+        cs, _ = cv2.findContours(seg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cs: continue
+        cnt = max(cs, key=cv2.contourArea)
+        if not is_calamansi(cnt, ppc): continue
+        f = compute_features(cnt, mask, hsv, ppc)
+        if f: feats.append(f); cnts.append(cnt)
+    if not feats:
+        cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in cs:
+            if not is_calamansi(cnt, ppc): continue
+            f = compute_features(cnt, mask, hsv, ppc)
+            if f: feats.append(f); cnts.append(cnt)
+    return feats, cnts
 
-    cap          = cv2.VideoCapture(tmp_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps          = cap.get(cv2.CAP_PROP_FPS) or 30
 
-    if total_frames == 0:
-        cap.release(); os.unlink(tmp_path)
-        return None, "❌ Could not read video. Try MP4 format."
+# ─────────────────────────────────────────
+# CALIBRATE PPC FROM VISIBLE FRUITS
+# No coin needed — uses visible fruit size as reference
+# (Representative sampling: visible fruits = same size as hidden fruits)
+# ─────────────────────────────────────────
 
-    # Sample up to 15 frames across the video
-    frame_indices = list(range(0, total_frames, max(1, int(fps))))[:15]
-    st.info(f"📹 {total_frames} frames at {fps:.0f} fps — analyzing {len(frame_indices)} frames for top + side views")
+def calibrate_ppc(hough_circles):
+    if not hough_circles:
+        return PIXELS_PER_CM
+    avg_r_px = np.mean([r for _,_,r in hough_circles])
+    # avg calamansi radius = 1.25cm
+    return max(avg_r_px / 1.25, 5.0)
 
-    progress   = st.progress(0, text="Analyzing video...")
-    frames_rgb = []
 
-    for idx, frame_no in enumerate(frame_indices):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
-        ret, frame = cap.read()
-        if ret:
-            frames_rgb.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        progress.progress((idx+1)/len(frame_indices), text=f"Loading frame {idx+1}/{len(frame_indices)}...")
+# ─────────────────────────────────────────
+# PUBLIC API
+# ─────────────────────────────────────────
 
-    cap.release(); os.unlink(tmp_path); progress.empty()
+def extract_features_from_path(image_path):
+    """Used by train_model.py."""
+    img_blur = preprocess_image(image_path)
+    if img_blur is None: return None
+    mask, hsv   = segment_fruit(img_blur)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid = [c for c in contours if is_calamansi(c, PIXELS_PER_CM)]
+    if not valid:
+        valid = [c for c in contours if cv2.contourArea(c) >= 50]
+    if not valid: return None
+    return compute_features(max(valid, key=cv2.contourArea), mask, hsv, PIXELS_PER_CM)
 
-    if not frames_rgb:
-        return None, "❌ Could not read video frames."
 
-    with st.spinner("🔬 Running 3D analysis across all frames..."):
-        result = process_video_frames(frames_rgb)
+def process_video_frames(frames_rgb):
+    """
+    Main pipeline. Accepts list of video frames (RGB).
 
-    if result is None or not result['features']:
-        return None, "❌ No calamansi detected. Check lighting and make sure fruits and coin are visible."
+    Automatically:
+    1. Separates top-view and side-view frames
+    2. From top frames: counts fruits per layer using Hough circles
+    3. From side frames: measures stack height → calculates layers
+    4. Total count = per_layer × layers
+    5. Extracts per-fruit features for juice prediction
 
-    # Add predictions
-    result['predictions'] = predict_from_features(result['features'])
+    Returns result dict or None.
+    """
+    top_frames  = []
+    side_frames = []
 
-    # Show analysis summary
-    method = result['method']
-    top_f  = result['top_frames']
-    side_f = result['side_frames']
-    est    = result['estimated_total']
-    visible = len(result['features'])
+    for frame_rgb in frames_rgb:
+        img_blur = preprocess_array(frame_rgb)
+        view     = classify_view(img_blur)
+        mask, hsv = segment_fruit(img_blur)
+        hough_count, hough_circles = count_fruits_hough(img_blur, mask)
 
-    if side_f > 0:
-        st.success(f"✅ 3D Analysis complete — {top_f} top frames + {side_f} side frames → ~{est} estimated fruits")
-        cols = st.columns(3)
-        cols[0].metric("📐 Basket Width",  f"{result['width_cm']:.1f} cm")
-        cols[1].metric("📐 Basket Length", f"{result['length_cm']:.1f} cm")
-        cols[2].metric("📐 Fill Height",   f"{result['height_cm']:.1f} cm")
+        data = {
+            'img_blur':      img_blur,
+            'mask':          mask,
+            'hsv':           hsv,
+            'hough_count':   hough_count,
+            'hough_circles': hough_circles,
+        }
+
+        if view == 'top':
+            top_frames.append(data)
+        else:
+            side_frames.append(data)
+
+    if not top_frames and not side_frames:
+        return None
+
+    # Use all available frames if no top frames detected
+    if not top_frames:
+        top_frames = side_frames
+
+    # Best top frame = most fruits visible
+    best_top = max(top_frames, key=lambda x: x['hough_count'])
+
+    img_blur       = best_top['img_blur']
+    mask           = best_top['mask']
+    hsv            = best_top['hsv']
+    hough_circles  = best_top['hough_circles']
+    hough_count    = best_top['hough_count']
+
+    # Calibrate pixels/cm from visible fruit size
+    ppc = calibrate_ppc(hough_circles)
+
+    # Average fruit diameter in pixels
+    avg_r_px   = np.mean([r for _,_,r in hough_circles]) if hough_circles else 15
+    avg_d_px   = avg_r_px * 2
+    avg_d_cm   = avg_d_px / ppc
+
+    # Detect basket
+    basket_contour, basket_area_px = detect_basket(img_blur)
+
+    # Per-layer count from Hough
+    per_layer = hough_count
+
+    # Layer count from side frames
+    if side_frames:
+        layer_counts = []
+        for sf in side_frames:
+            layers = measure_layers_from_side(sf['img_blur'], avg_d_px)
+            if layers > 0:
+                layer_counts.append(layers)
+        layers = int(np.median(layer_counts)) if layer_counts else 1
+        method = f"Auto-detected ({len(side_frames)} side frames)"
     else:
-        st.success(f"✅ Analyzed {top_f} top frames — {visible} visible fruits, ~{est} estimated total")
-        st.info("💡 **Tip:** For more accurate counting, tilt the camera to show the side of the basket in the same video. The system will use 3D volume to estimate the total count.")
+        layers = 1
+        method = "Top view only — tilt camera to side for better count"
 
-    return result, None
+    total_count = per_layer * layers
 
+    # Per-fruit features for juice prediction
+    all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
-# ══════════════════════════════════════════════════════
-# PAGE 1: HOME
-# ══════════════════════════════════════════════════════
-if page == "🏠 Home":
-    st.markdown('<div class="main-title">🍋 Calamansi Juice Yield Prediction System</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">An Image-Based System Using Linear Regression</div>', unsafe_allow_html=True)
-    st.divider()
-
-    col1, col2 = st.columns([1.5, 1])
-    with col1:
-        st.markdown('<div class="section-header">📌 About This System</div>', unsafe_allow_html=True)
-        st.write("""
-        This system predicts the **juice yield (mL)** of Calamansi fruits
-        *(Citrus microcarpa)* using video processing and linear regression.
-        Record a short top-down video of your calamansi basket with a **1-peso coin** beside it —
-        the system detects visible fruits, estimates the **total count including hidden fruits**,
-        and predicts the **total juice yield** of the entire basket.
-        """)
-        st.markdown('<div class="section-header">🎯 Objectives</div>', unsafe_allow_html=True)
-        st.write("**1.** Collect and process calamansi fruit images.")
-        st.write("**2.** Extract image features such as size, shape, and color.")
-        st.write("**3.** Train a Linear Regression model to predict juice yield.")
-        st.write("**4.** Deploy the model as a web-based prediction system.")
-
-    with col2:
-        st.markdown('<div class="section-header">📐 System Scope</div>', unsafe_allow_html=True)
-        st.markdown("""
-        | Item | Detail |
-        |------|--------|
-        | Fruit | Calamansi *(Citrus microcarpa)* |
-        | Input | Video (MP4, MOV, AVI) |
-        | Setup | Basket or container |
-        | Calibration | 1-peso coin beside basket |
-        | Output | Total count + total juice yield |
-        | Model | Linear Regression |
-        | Features | Shape + Color |
-        """)
-
-    st.divider()
-    st.markdown('<div class="section-header">🍋 What is Calamansi? (Citrus microcarpa)</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg",
-                 caption="Calamansi (Citrus microcarpa)", width='stretch')
-    with c2:
-        st.markdown("""
-        Calamansi is a small citrus fruit native to the Philippines, commonly used for juice.
-
-        **Physical characteristics:**
-        - **Shape:** Round, spherical — like a small lime
-        - **Size:** 2 to 4 cm in diameter (system filters 1.5–5.5 cm)
-        - **Color:** Green when unripe, yellow-orange when ripe
-
-        **Ripeness stages:**
-
-        | Stage | Color | Description |
-        |-------|-------|-------------|
-        | 🟢 Green | Dark green | Unripe, more acidic |
-        | 🟡 Turning | Yellow-green | Partially ripe |
-        | 🟠 Ripe | Yellow-orange | Fully ripe, sweeter |
-
-        **Why the system detects calamansi only:**
-        The system filters by calamansi-specific **size range (1.5–5.5 cm)**, 
-        **round shape (circularity ≥ 0.25)**, and **green/yellow-orange color** —
-        ruling out other fruits that don't match all three criteria.
-        """)
-
-    st.divider()
-    st.markdown('<div class="section-header">📷 How to Record</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown('<div class="step-box">☀️ <b>Lighting</b><br>Use bright, even lighting. Avoid heavy shadows.</div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="step-box">🪙 <b>1-Peso Coin</b><br>Place coin beside the basket — visible in every frame. Allows accurate measurement at any distance.</div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="step-box">🧺 <b>Basket</b><br>Place calamansi in basket. Fruits can be touching or stacked — system estimates hidden ones.</div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown('<div class="step-box">📹 <b>Video</b><br>Record 3–10 seconds from directly above (top-down). Keep whole basket in frame.</div>', unsafe_allow_html=True)
-
-    st.divider()
-    st.markdown('<div class="section-header">⚙️ How the System Works</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.markdown('<div class="step-box">📹 <b>Step 1</b><br>Upload top-down video of basket with 1-peso coin</div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="step-box">🪙 <b>Step 2</b><br>Detect coin → calibrate real-world size at any distance</div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="step-box">🧺 <b>Step 3</b><br>Detect basket area + visible fruits → estimate total count</div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown('<div class="step-box">📐 <b>Step 4</b><br>Extract shape & color features — filter by calamansi size and color</div>', unsafe_allow_html=True)
-    with c5:
-        st.markdown('<div class="step-box">💧 <b>Step 5</b><br>Predict juice per fruit × estimated total count = total yield</div>', unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════
-# PAGE 2: PREDICT
-# ══════════════════════════════════════════════════════
-elif page == "🔍 Predict Juice Yield":
-    st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Record your calamansi basket with a 1-peso coin beside it</div>', unsafe_allow_html=True)
-    st.divider()
-
-    if not model_loaded:
-        st.error("❌ Model not found. Please run **train_model.py** first.")
-        st.stop()
-
-    st.markdown("""
-    **How to record for best accuracy:**
-    1. Place calamansi in a basket or container
-    2. Put a **1-peso coin beside the basket** — keep it visible throughout
-    3. **Top-down view (3–5 sec):** Hold camera directly above the basket
-    4. **Side view (2–3 sec):** Tilt camera to show the side/height of the basket
-    5. Upload the video — system detects both views automatically
-    """)
-    st.info("📐 **3D Mode:** If side view is detected, the system calculates basket volume (width × length × height) for a more accurate total fruit count.")
-
-    uploaded_video = st.file_uploader("📹 Upload video (MP4, MOV, AVI)", type=['mp4','mov','avi','m4v'])
-
-    if uploaded_video:
-        result, error = process_video(uploaded_video)
-
-        if error:
-            st.error(error)
-            st.stop()
-
-        annotated = annotate_image(
-            result['img_blur'], result['contours'],
-            result['coin_contour'], result['basket_contour']
-        )
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown('<div class="section-header">🎬 Best Video Frame</div>', unsafe_allow_html=True)
-            st.image(result['img_blur'], width='stretch')
-        with c2:
-            st.markdown(f'<div class="section-header">🔬 Detected Fruits ({len(result["features"])} visible)</div>', unsafe_allow_html=True)
-            st.image(annotated, width='stretch')
-
-        st.markdown("""
-        <small style="color:#6b7280;">
-        🟢 Green boxes = calamansi fruits &nbsp;|&nbsp;
-        🟡 Yellow box = 1-peso coin (calibration) &nbsp;|&nbsp;
-        🔵 Blue outline = basket boundary
-        </small>
-        """, unsafe_allow_html=True)
-
-        st.divider()
-        show_results(
-            result['features'], result['predictions'],
-            result['estimated_total'], result['pixels_per_cm'],
-            result['coin_contour'], result['basket_contour']
-        )
-
-
-# ══════════════════════════════════════════════════════
-# PAGE 3: MODEL PERFORMANCE
-# ══════════════════════════════════════════════════════
-elif page == "📊 Model Performance":
-    st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Evaluation metrics and graphs of the Linear Regression model</div>', unsafe_allow_html=True)
-    st.divider()
-
-    if not model_loaded:
-        st.error("❌ Model not found. Please run **train_model.py** first.")
-        st.stop()
-    if not os.path.exists('calamansi_dataset.csv'):
-        st.error("❌ Dataset not found. Please run **train_model.py** first.")
-        st.stop()
-
-    df     = pd.read_csv('calamansi_dataset.csv')
-    X      = df[FEATURE_COLS]; y = df['juice_ml']
-    X_sc   = scaler.transform(X)
-    y_pred = model.predict(X_sc)
-    mae    = mean_absolute_error(y, y_pred)
-    rmse   = np.sqrt(mean_squared_error(y, y_pred))
-    r2     = r2_score(y, y_pred)
-
-    st.markdown('<div class="section-header">📐 Evaluation Metrics</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Samples", f"{len(df)}")
-    c2.metric("R² Score",      f"{r2:.4f}",    help="Closer to 1.0 is better")
-    c3.metric("MAE",           f"{mae:.4f} mL", help="Mean Absolute Error")
-    c4.metric("RMSE",          f"{rmse:.4f} mL",help="Root Mean Squared Error")
-
-    st.divider()
-    st.markdown('<div class="section-header">📈 Actual vs Predicted & Residuals</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        fig1, ax1 = plt.subplots(figsize=(6, 5))
-        ax1.scatter(y, y_pred, color='steelblue', alpha=0.7, edgecolors='white', s=60)
-        mn, mx = min(y.min(), y_pred.min())-0.5, max(y.max(), y_pred.max())+0.5
-        ax1.plot([mn,mx],[mn,mx],'r--',lw=2,label='Perfect Prediction')
-        ax1.set_xlabel('Actual (mL)'); ax1.set_ylabel('Predicted (mL)')
-        ax1.set_title('Actual vs Predicted'); ax1.legend()
-        ax1.text(0.05,0.92,f'R²={r2:.4f}',transform=ax1.transAxes,fontsize=10,color='darkred',
-                 bbox=dict(boxstyle='round',facecolor='lightyellow',alpha=0.8))
-        plt.tight_layout(); st.pyplot(fig1)
-    with col2:
-        fig2, ax2 = plt.subplots(figsize=(6, 5))
-        ax2.scatter(y_pred, y-y_pred, color='darkorange', alpha=0.7, edgecolors='white', s=60)
-        ax2.axhline(0,color='red',linestyle='--',lw=2)
-        ax2.set_xlabel('Predicted (mL)'); ax2.set_ylabel('Residuals (mL)')
-        ax2.set_title('Residuals vs Fitted')
-        plt.tight_layout(); st.pyplot(fig2)
-
-    st.divider()
-    st.markdown('<div class="section-header">🔥 Correlation Heatmap & Feature Coefficients</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        fig3, ax3 = plt.subplots(figsize=(7, 6))
-        corr = df[FEATURE_COLS+['juice_ml']].corr()
-        sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm',
-                    mask=np.triu(np.ones_like(corr,dtype=bool)),
-                    square=True, linewidths=0.5, ax=ax3, cbar_kws={"shrink":0.8})
-        ax3.set_title('Feature Correlation Heatmap')
-        plt.tight_layout(); st.pyplot(fig3)
-    with col2:
-        coef_df = pd.DataFrame({'Feature':FEATURE_COLS,'Coefficient':model.coef_}).sort_values('Coefficient',ascending=True)
-        colors  = ['#d73027' if c<0 else '#1a9850' for c in coef_df['Coefficient']]
-        fig4, ax4 = plt.subplots(figsize=(7, 6))
-        bars = ax4.barh(coef_df['Feature'], coef_df['Coefficient'], color=colors, edgecolor='white')
-        ax4.axvline(0,color='black',linewidth=0.8)
-        ax4.set_xlabel('Coefficient Value'); ax4.set_title('Feature Coefficients')
-        for bar, val in zip(bars, coef_df['Coefficient']):
-            ax4.text(val+(0.005 if val>=0 else -0.005), bar.get_y()+bar.get_height()/2,
-                     f'{val:.3f}', va='center', ha='left' if val>=0 else 'right', fontsize=9)
-        plt.tight_layout(); st.pyplot(fig4)
-
-    st.divider()
-    st.markdown('<div class="section-header">🔁 5-Fold Cross Validation</div>', unsafe_allow_html=True)
-    with st.spinner("Running cross validation..."):
-        kf     = KFold(n_splits=5, shuffle=True, random_state=42)
-        cv_r2  = cross_val_score(model, X_sc, y, cv=kf, scoring='r2')
-        cv_mae = -cross_val_score(model, X_sc, y, cv=kf, scoring='neg_mean_absolute_error')
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Mean R² (CV)",  f"{cv_r2.mean():.4f}",     f"± {cv_r2.std():.4f}")
-        st.metric("Mean MAE (CV)", f"{cv_mae.mean():.4f} mL", f"± {cv_mae.std():.4f}")
-    with col2:
-        fig5, ax5 = plt.subplots(figsize=(6, 4))
-        ax5.bar([f'Fold {i+1}' for i in range(5)], cv_r2, color='steelblue', edgecolor='white')
-        ax5.axhline(cv_r2.mean(),color='red',linestyle='--',lw=2,label=f'Mean={cv_r2.mean():.4f}')
-        ax5.set_ylim(0,1.05); ax5.set_ylabel('R² Score')
-        ax5.set_title('5-Fold Cross Validation R² Scores'); ax5.legend()
-        for i, v in enumerate(cv_r2):
-            ax5.text(i, v+0.01, f'{v:.3f}', ha='center', fontsize=10)
-        plt.tight_layout(); st.pyplot(fig5)
-
-    st.divider()
-    st.markdown('<div class="section-header">📝 Linear Regression Equation</div>', unsafe_allow_html=True)
-    eq = f"juice_ml = {model.intercept_:.4f}"
-    for feat, coef in zip(FEATURE_COLS, model.coef_):
-        eq += f" {'+'if coef>=0 else'-'} {abs(coef):.4f} × {feat}"
-    st.code(eq, language=None)
+    return {
+        'features':        all_features,
+        'contours':        valid_cnts,
+        'img_blur':        img_blur,
+        'mask':            mask,
+        'ppc':             ppc,
+        'basket_contour':  basket_contour,
+        'hough_count':     hough_count,
+        'hough_circles':   hough_circles,
+        'per_layer':       per_layer,
+        'layers':          layers,
+        'total_count':     total_count,
+        'avg_diameter_cm': avg_d_cm,
+        'top_frames':      len(top_frames),
+        'side_frames':     len(side_frames),
+        'method':          method,
+    }
