@@ -421,30 +421,39 @@ def process_video_frames(frames_rgb):
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
     if side_frames:
-        layer_counts = [measure_layers_from_side(sf['img_blur'], avg_d_px) for sf in side_frames]
-        layers = max(1, int(np.median(layer_counts)))
-        method = f"Auto-detected ({len(side_frames)} side frames)"
+        raw = [measure_layers_from_side(sf['img_blur'], avg_d_px) for sf in side_frames]
+        # measure_layers_from_side now returns (layers, annotated, rim_y, height_cm)
+        layer_counts = [r[0] if isinstance(r, tuple) else r for r in raw]
+        layer_counts = [l for l in layer_counts if l > 0]
+        layers       = max(1, int(np.median(layer_counts))) if layer_counts else 1
+        annotated_side = raw[0][1] if isinstance(raw[0], tuple) else None
+        height_cm    = raw[0][3] if isinstance(raw[0], tuple) else 0.0
+        method = f"Auto-detected ({len(side_frames)} side frames) → {layers} layers"
     else:
-        layers = 1
-        method = "Top view only — add side photo for better count"
+        layers         = 1
+        annotated_side = None
+        height_cm      = 0.0
+        method         = "Top view only — tilt camera to show basket side for better count"
 
     total_count  = hough_count * layers
     avg_diameter = np.mean([f['diameter_cm'] for f in all_features]) if all_features else 2.5
 
     return {
-        'features':       all_features,
-        'contours':       valid_cnts,
-        'img_blur':       img_blur,
-        'mask':           mask,
-        'ppc':            ppc,
-        'basket_contour': basket_contour,
-        'hough_count':    hough_count,
-        'hough_circles':  hough_circles,
-        'per_layer':      hough_count,
-        'layers':         layers,
-        'total_count':    total_count,
-        'avg_diameter':   avg_diameter,
-        'top_frames':     len(top_frames),
-        'side_frames':    len(side_frames),
-        'method':         method,
+        'features':        all_features,
+        'contours':        valid_cnts,
+        'img_blur':        img_blur,
+        'mask':            mask,
+        'ppc':             ppc,
+        'basket_contour':  basket_contour,
+        'hough_count':     hough_count,
+        'hough_circles':   hough_circles,
+        'per_layer':       hough_count,
+        'layers':          layers,
+        'total_count':     total_count,
+        'avg_diameter':    avg_diameter,
+        'annotated_side':  annotated_side,
+        'height_cm':       height_cm,
+        'top_frames':      len(top_frames),
+        'side_frames':     len(side_frames),
+        'method':          method,
     }
