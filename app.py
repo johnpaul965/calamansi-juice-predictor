@@ -273,7 +273,7 @@ if page == "🏠 Home":
 # ══════════════════════════════════════════════════════
 elif page == "🔍 Predict Juice Yield":
     st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Take 2 photos of your basket — system detects everything automatically</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Record a video of your basket — system detects everything automatically</div>', unsafe_allow_html=True)
     st.divider()
 
     if not model_loaded:
@@ -281,59 +281,77 @@ elif page == "🔍 Predict Juice Yield":
         st.stop()
 
     st.markdown("""
-    **How to take photos:**
-    1. **Photo 1 — Top view:** Hold camera directly above the basket looking straight down
-    2. **Photo 2 — Side view:** Hold camera at the side of the basket so you can see the basket wall and how high fruits are stacked
+    **How to record:**
+    1. **Top view (3–5 sec):** Hold camera directly above the basket looking straight down
+    2. **Tilt slowly to side (2–3 sec):** Show the basket wall and how high fruits are stacked
+    3. Keep the whole basket in frame throughout
     """)
-    st.info("📐 The system uses both photos automatically — no inputs needed.")
+    st.info("📐 System automatically finds top and side frames — no inputs needed.")
 
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('<div class="section-header">📸 Photo 1 — Top View</div>', unsafe_allow_html=True)
-        top_photo = st.file_uploader("Upload top-down photo", type=['jpg','jpeg','png'], key="top")
-    with c2:
-        st.markdown('<div class="section-header">📸 Photo 2 — Side View</div>', unsafe_allow_html=True)
-        side_photo = st.file_uploader("Upload side photo", type=['jpg','jpeg','png'], key="side")
+    uploaded_video = st.file_uploader("📹 Upload video (MP4, MOV, AVI)", type=['mp4','mov','avi','m4v'])
 
-    if top_photo and side_photo:
-        top_img  = np.array(Image.open(top_photo).convert('RGB'))
-        side_img = np.array(Image.open(side_photo).convert('RGB'))
+    if uploaded_video:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            tmp.write(uploaded_video.read())
+            tmp_path = tmp.name
+
+        cap          = cv2.VideoCapture(tmp_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 30
+
+        if total_frames == 0:
+            st.error("❌ Could not read video. Try MP4 format.")
+            os.unlink(tmp_path)
+            st.stop()
+
+        frame_indices = list(range(0, total_frames, max(1, int(fps))))[:15]
+        st.info(f"📹 {total_frames} frames at {fps:.0f} fps — analyzing {len(frame_indices)} frames")
+
+        progress   = st.progress(0, text="Loading frames...")
+        frames_rgb = []
+        for idx, fn in enumerate(frame_indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fn)
+            ret, frame = cap.read()
+            if ret:
+                frames_rgb.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            progress.progress((idx+1)/len(frame_indices), text=f"Frame {idx+1}/{len(frame_indices)}...")
+
+        cap.release(); os.unlink(tmp_path); progress.empty()
 
         with st.spinner("🔬 Detecting calamansi and analyzing..."):
-            result = process_video_frames([top_img, side_img])
+            result = process_video_frames(frames_rgb)
 
         if result is None or not result['features']:
             st.error("❌ No calamansi detected. Check lighting and make sure fruits are clearly visible.")
             st.stop()
 
         predictions = predict_from_features(result['features'])
-        avg_pred = sum(predictions)/len(predictions) if predictions else 5.2
-        model_reliable = avg_pred >= 3.0
-
-        if not model_reliable:
-            st.warning("⚠️ Model is still training (needs 100+ samples). Using average juice yield of 5.2 mL/fruit from collected data.")
 
         if result['side_frames'] > 0:
             st.success(f"✅ {result['per_layer']} per layer × {result['layers']} layers = ~{result['total_count']} total fruits")
         else:
-            st.success(f"✅ {result['hough_count']} fruits detected")
-            st.warning("⚠️ Side view not detected in Photo 2 — make sure the basket wall and fruit height are visible.")
+            st.success(f"✅ {result['hough_count']} fruits detected in top view")
+            st.warning("⚠️ No side view detected — tilt camera to show basket side for accurate layer count.")
 
         annotated = annotate_image(
             result['img_blur'], result['contours'],
             result['basket_contour'], result['hough_circles']
         )
 
-        # Show all 3: top photo, annotated side, annotated detection
+        # Show top frame, annotated side, detected
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown('<div class="section-header">📷 Top View</div>', unsafe_allow_html=True)
-            st.image(Image.open(top_photo), width='stretch')
+            st.markdown('<div class="section-header">📷 Top View Frame</div>', unsafe_allow_html=True)
+            st.image(result['img_blur'], width='stretch')
         with c2:
-            st.markdown(f'<div class="section-header">📷 Side View — {result["layers"]} layers detected</div>', unsafe_allow_html=True)
-            st.image(result['annotated_side'], width='stretch')
-            st.caption(f"🔴 Red line = basket rim | 🟡 Arrow = {result['height_cm']:.1f}cm fill height")
+            st.markdown(f'<div class="section-header">📷 Side View — {result["layers"]} layers</div>', unsafe_allow_html=True)
+            side_display = result.get('annotated_side', result['img_blur'])
+            st.image(side_display, width='stretch')
+            height_cm = result.get('height_cm', 0)
+            if height_cm > 0:
+                st.caption(f"🔴 Red line = basket rim | {height_cm:.1f}cm ÷ 2.5cm = {result['layers']} layers")
+            else:
+                st.caption("No side frame detected in video")
         with c3:
             st.markdown(f'<div class="section-header">🔬 Detected ({result["hough_count"]} inside basket)</div>', unsafe_allow_html=True)
             st.image(annotated, width='stretch')
@@ -349,9 +367,6 @@ elif page == "🔍 Predict Juice Yield":
             result['features'], predictions,
             result['total_count'], result['per_layer'], result['layers']
         )
-
-    elif top_photo and not side_photo:
-        st.info("📸 Top photo uploaded. Now upload the side photo to continue.")
 
 
 # ══════════════════════════════════════════════════════

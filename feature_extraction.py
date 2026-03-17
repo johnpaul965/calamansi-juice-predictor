@@ -259,14 +259,12 @@ def detect_coin_side(img_blur):
 
 def measure_layers_from_side(img_blur, avg_fruit_diameter_px):
     """
-    Measure layers from side view.
-    Uses the BASKET RIM (lowest strong horizontal line) to measure
-    fruit fill height — avoids counting fruits that overflow above rim.
+    Measure layers from side view using basket rim line + coin calibration.
+    Returns (layers, annotated_side_image, rim_y, height_cm).
     """
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     H    = img_blur.shape[0]
 
-    # Find the basket bottom rim: lowest strong horizontal line in lower half
     edges = cv2.Canny(gray, 30, 100)
     lines = cv2.HoughLinesP(edges, 1, np.pi/180,
                             threshold=50, minLineLength=80, maxLineGap=20)
@@ -274,9 +272,7 @@ def measure_layers_from_side(img_blur, avg_fruit_diameter_px):
     rim_y = None
     if lines is not None:
         horiz = [(y1, x1, x2, abs(x2-x1)) for x1,y1,x2,y2 in lines[:,0] if abs(y2-y1) < 8]
-        # Find darkest long horizontal line in 30-70% range (basket wall is black plastic)
-        best_dark = None
-        best_brightness = 999
+        best_dark, best_brightness = None, 999
         for y, x1, x2, length in horiz:
             if length > 80 and H*0.25 < y < H*0.50:
                 region = gray[max(0,y-3):y+3, min(x1,x2):max(x1,x2)]
@@ -288,8 +284,8 @@ def measure_layers_from_side(img_blur, avg_fruit_diameter_px):
                     best_dark = y
         rim_y = best_dark
 
+    # Fallback
     if rim_y is None:
-        # Fallback: use fruit mask extent but limit to 60% of image height
         hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
         fmask = cv2.bitwise_or(
             cv2.inRange(hsv, np.array([25,15,40]),  np.array([95,255,210])),
@@ -299,19 +295,31 @@ def measure_layers_from_side(img_blur, avg_fruit_diameter_px):
         threshold  = rows.max() * 0.1
         fruit_rows = np.where(rows > threshold)[0]
         if len(fruit_rows) == 0 or avg_fruit_diameter_px <= 0:
-            return 1
+            return 1, img_blur.copy(), None, 0.0
         height_px = min(fruit_rows[-1] - fruit_rows[0], int(H * 0.6))
-        return max(1, round(height_px / avg_fruit_diameter_px))
+        layers = max(1, round(height_px / avg_fruit_diameter_px))
+        return layers, img_blur.copy(), None, height_px / (avg_fruit_diameter_px / 2.5)
 
-    # Try to calibrate using coin in side photo (more accurate)
+    # Calibrate using coin
     side_ppc = detect_coin_side(img_blur)
     if side_ppc and side_ppc > 5:
         height_cm = rim_y / side_ppc
-        layers    = round(height_cm / 2.5)  # 2.5cm = avg calamansi diameter
+        layers    = max(1, round(height_cm / 2.5))
     else:
-        layers = round(rim_y / avg_fruit_diameter_px)
+        layers    = max(1, round(rim_y / avg_fruit_diameter_px))
+        height_cm = layers * 2.5
 
-    return max(1, layers)
+    # Annotate side image with rim line
+    annotated_side = img_blur.copy()
+    cv2.line(annotated_side, (0, rim_y), (annotated_side.shape[1], rim_y), (255, 0, 0), 3)
+    cv2.putText(annotated_side, f"Basket rim — {layers} layers",
+                (5, rim_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+    # Draw arrow showing height
+    cv2.arrowedLine(annotated_side, (20, 0), (20, rim_y), (255, 255, 0), 2)
+    cv2.putText(annotated_side, f"{height_cm:.1f}cm",
+                (25, rim_y // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+    return layers, annotated_side, rim_y, height_cm
 
 
 def process_video_frames(frames_rgb):
@@ -329,38 +337,57 @@ def process_video_frames(frames_rgb):
     if len(frames_rgb) == 2:
         top_blur          = preprocess_array(frames_rgb[0])
         top_mask, top_hsv = segment_fruit(top_blur)
-        hough_count, hough_circles = count_fruits_hough(top_blur, top_mask)
-        ppc               = calibrate_ppc(hough_circles)
         basket_contour, _ = detect_basket(top_blur)
-        all_features, valid_cnts = get_fruit_features(top_blur, top_mask, top_hsv, ppc)
+
+        # Build basket mask to filter detections INSIDE basket only
+        basket_mask = np.zeros(top_blur.shape[:2], dtype=np.uint8)
+        if basket_contour is not None:
+            cv2.drawContours(basket_mask, [basket_contour], -1, 255, -1)
+            # Only detect fruits inside basket
+            top_mask_inside = cv2.bitwise_and(top_mask, basket_mask)
+        else:
+            top_mask_inside = top_mask
+
+        hough_count, hough_circles = count_fruits_hough(top_blur, top_mask_inside)
+        # Filter hough circles to only those inside basket
+        if basket_contour is not None and hough_circles:
+            hough_circles = [
+                (x, y, r) for x, y, r in hough_circles
+                if cv2.pointPolygonTest(basket_contour, (float(x), float(y)), False) >= 0
+            ]
+            hough_count = len(hough_circles)
+
+        ppc = calibrate_ppc(hough_circles)
+        all_features, valid_cnts = get_fruit_features(top_blur, top_mask_inside, top_hsv, ppc)
 
         avg_d_px = np.mean([r for _,_,r in hough_circles]) * 2 if hough_circles else 30
-        avg_d_cm = avg_d_px / ppc if ppc > 0 else 2.5
 
-        # Side photo layer detection using basket rim
-        side_blur    = preprocess_array(frames_rgb[1])
-        layers       = measure_layers_from_side(side_blur, avg_d_px)
-        method       = f"Side photo → basket rim detection → {layers} layers"
+        # Side photo layer detection
+        side_blur = preprocess_array(frames_rgb[1])
+        layers, annotated_side, rim_y, height_cm = measure_layers_from_side(side_blur, avg_d_px)
+        method = f"Side photo → basket rim ({height_cm:.1f}cm ÷ 2.5cm = {layers} layers)"
 
         total_count  = hough_count * layers
         avg_diameter = np.mean([f['diameter_cm'] for f in all_features]) if all_features else 2.5
 
         return {
-            'features':       all_features,
-            'contours':       valid_cnts,
-            'img_blur':       top_blur,
-            'mask':           top_mask,
-            'ppc':            ppc,
-            'basket_contour': basket_contour,
-            'hough_count':    hough_count,
-            'hough_circles':  hough_circles,
-            'per_layer':      hough_count,
-            'layers':         layers,
-            'total_count':    total_count,
-            'avg_diameter':   avg_diameter,
-            'top_frames':     1,
-            'side_frames':    1,
-            'method':         method,
+            'features':        all_features,
+            'contours':        valid_cnts,
+            'img_blur':        top_blur,
+            'annotated_side':  annotated_side,
+            'mask':            top_mask_inside,
+            'ppc':             ppc,
+            'basket_contour':  basket_contour,
+            'hough_count':     hough_count,
+            'hough_circles':   hough_circles,
+            'per_layer':       hough_count,
+            'layers':          layers,
+            'total_count':     total_count,
+            'avg_diameter':    avg_diameter,
+            'height_cm':       height_cm,
+            'top_frames':      1,
+            'side_frames':     1,
+            'method':          method,
         }
 
     # ── Multiple frames (video) mode ───────────────────────
