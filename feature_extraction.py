@@ -67,10 +67,14 @@ def classify_view(img_blur):
 
 def segment_fruit(img_blur):
     hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
-    mask1 = cv2.inRange(hsv, np.array([25,15,40]),  np.array([95,255,210]))
-    mask2 = cv2.inRange(hsv, np.array([10,30,60]),  np.array([40,255,255]))
+    # Standard: green + yellow-orange calamansi
+    mask1 = cv2.inRange(hsv, np.array([25, 15, 40]),  np.array([95, 255, 210]))
+    mask2 = cv2.inRange(hsv, np.array([10, 30, 60]),  np.array([40, 255, 255]))
     mask  = cv2.bitwise_or(mask1, mask2)
-    k     = np.ones((3,3), np.uint8)
+    # Extra: dark green fruits against bright-colored basket (V < 120)
+    mask3 = cv2.inRange(hsv, np.array([25, 30, 20]),  np.array([95, 255, 120]))
+    mask  = cv2.bitwise_or(mask, mask3)
+    k     = np.ones((3, 3), np.uint8)
     mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
     return mask, hsv
@@ -102,23 +106,49 @@ def detect_basket(img_blur):
 # ─────────────────────────────────────────
 
 def count_fruits_hough(img_blur, mask, avg_r_px=None):
-    gray_m = cv2.bitwise_and(cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY), mask)
+    """
+    Count visible fruits using Hough circles on grayscale.
+    Uses adaptive brightness threshold to work with any basket color.
+    Fruits are generally darker than bright-colored basket walls.
+    """
+    gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+
     if avg_r_px:
         min_r = max(5,  int(avg_r_px * 0.6))
         max_r = min(80, int(avg_r_px * 1.4))
     else:
         min_r, max_r = 8, 45
     minD = max(min_r * 2, 10)
+
     circles = cv2.HoughCircles(
-        gray_m, cv2.HOUGH_GRADIENT, dp=1.2,
-        minDist=minD, param1=50, param2=30,
+        gray, cv2.HOUGH_GRADIENT, dp=1.2,
+        minDist=minD, param1=50, param2=28,
         minRadius=min_r, maxRadius=max_r
     )
     if circles is None:
         return 0, []
+
     circles = np.round(circles[0,:]).astype("int")
-    valid   = [(x,y,r) for x,y,r in circles
-               if 0<=y<mask.shape[0] and 0<=x<mask.shape[1] and mask[y,x]>0]
+
+    # Adaptive brightness threshold: fruits are below image mean
+    mean_v = float(gray.mean())
+    bright_thresh = min(155, int(mean_v + 10))
+
+    valid = []
+    for x, y, r in circles:
+        if not (0<=y<gray.shape[0] and 0<=x<gray.shape[1]):
+            continue
+        # Center must be darker than basket wall
+        if gray[y, x] > bright_thresh:
+            continue
+        # Center must be in fruit color range (green/yellow-orange)
+        h_val = int(hsv[y, x, 0])
+        s_val = int(hsv[y, x, 1])
+        if not (10 <= h_val <= 95 and s_val > 20):
+            continue
+        valid.append((x, y, r))
+
     return len(valid), valid
 
 
@@ -421,30 +451,39 @@ def process_video_frames(frames_rgb):
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
     if side_frames:
-        layer_counts = [measure_layers_from_side(sf['img_blur'], avg_d_px) for sf in side_frames]
-        layers = max(1, int(np.median(layer_counts)))
-        method = f"Auto-detected ({len(side_frames)} side frames)"
+        raw = [measure_layers_from_side(sf['img_blur'], avg_d_px) for sf in side_frames]
+        # measure_layers_from_side now returns (layers, annotated, rim_y, height_cm)
+        layer_counts = [r[0] if isinstance(r, tuple) else r for r in raw]
+        layer_counts = [l for l in layer_counts if l > 0]
+        layers       = max(1, int(np.median(layer_counts))) if layer_counts else 1
+        annotated_side = raw[0][1] if isinstance(raw[0], tuple) else None
+        height_cm    = raw[0][3] if isinstance(raw[0], tuple) else 0.0
+        method = f"Auto-detected ({len(side_frames)} side frames) → {layers} layers"
     else:
-        layers = 1
-        method = "Top view only — add side photo for better count"
+        layers         = 1
+        annotated_side = None
+        height_cm      = 0.0
+        method         = "Top view only — tilt camera to show basket side for better count"
 
     total_count  = hough_count * layers
     avg_diameter = np.mean([f['diameter_cm'] for f in all_features]) if all_features else 2.5
 
     return {
-        'features':       all_features,
-        'contours':       valid_cnts,
-        'img_blur':       img_blur,
-        'mask':           mask,
-        'ppc':            ppc,
-        'basket_contour': basket_contour,
-        'hough_count':    hough_count,
-        'hough_circles':  hough_circles,
-        'per_layer':      hough_count,
-        'layers':         layers,
-        'total_count':    total_count,
-        'avg_diameter':   avg_diameter,
-        'top_frames':     len(top_frames),
-        'side_frames':    len(side_frames),
-        'method':         method,
+        'features':        all_features,
+        'contours':        valid_cnts,
+        'img_blur':        img_blur,
+        'mask':            mask,
+        'ppc':             ppc,
+        'basket_contour':  basket_contour,
+        'hough_count':     hough_count,
+        'hough_circles':   hough_circles,
+        'per_layer':       hough_count,
+        'layers':          layers,
+        'total_count':     total_count,
+        'avg_diameter':    avg_diameter,
+        'annotated_side':  annotated_side,
+        'height_cm':       height_cm,
+        'top_frames':      len(top_frames),
+        'side_frames':     len(side_frames),
+        'method':          method,
     }
