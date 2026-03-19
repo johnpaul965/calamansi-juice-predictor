@@ -11,7 +11,8 @@ from PIL import Image
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import cross_val_score, KFold
 
-from feature_extraction import process_video_frames, FEATURE_COLS
+from feature_extraction import preprocess_array, segment_fruit, get_fruit_features, \
+    detect_basket, calibrate_ppc, count_hough, FEATURE_COLS
 
 st.set_page_config(
     page_title="Calamansi Juice Yield Prediction System",
@@ -60,6 +61,8 @@ st.sidebar.markdown("Development of an Image-Based System for Predicting Calaman
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Model Status:** {'✅ Loaded' if model_loaded else '❌ Not found — run train_model.py'}")
 
+TRAINING_AVG = 5.30
+
 
 # ══════════════════════════════════════════════════════
 # HELPERS
@@ -71,45 +74,54 @@ def predict_from_features(all_features):
         X    = np.array([[f[col] for col in FEATURE_COLS]])
         pred = model.predict(scaler.transform(X))[0]
         preds.append(max(pred, 1.0))
-
-    # Training data range: 3.6–7.2 mL, avg = 5.30 mL
-    # If avg prediction is outside training range → model scale mismatch
-    # Fall back to training average
-    TRAINING_AVG = 5.30
-    avg_pred = sum(preds) / len(preds) if preds else 0
-    if avg_pred < 3.6 or avg_pred > 7.2:
+    avg = sum(preds)/len(preds) if preds else 0
+    if avg < 3.6 or avg > 7.2:
         preds = [TRAINING_AVG] * len(preds)
-
     return preds
 
 
 def get_ripeness(all_features):
+    if not all_features:
+        return "🟢 Green Stage", "#16a34a", "Dark green — unripe calamansi."
     avg_hue = np.mean([f['mean_hue'] for f in all_features])
     if avg_hue < 25:
-        return "🟠 Ripe Stage",    "#f97316", "Yellow-orange — fully ripe calamansi."
+        return "🟠 Ripe Stage",    "#f97316", "Yellow-orange — fully ripe."
     elif avg_hue < 50:
         return "🟡 Turning Stage", "#eab308", "Partially yellow — between green and ripe."
     else:
         return "🟢 Green Stage",   "#16a34a", "Dark green — unripe calamansi."
 
 
-def annotate_image(img_blur, contours, basket_contour, hough_circles):
-    out = img_blur.copy()
+def detect_on_frame(img_rgb):
+    """Run full detection on one frame."""
+    img_blur          = preprocess_array(img_rgb)
+    mask, hsv         = segment_fruit(img_blur)
+    circles           = count_hough(img_blur, mask)
+    ppc               = calibrate_ppc(circles) if circles else 41.0
+    basket_contour, _ = detect_basket(img_blur)
+    all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
+
     # Draw basket boundary
+    annotated = img_blur.copy()
     if basket_contour is not None:
-        cv2.drawContours(out, [basket_contour], -1, (59, 130, 246), 2)
-    # Draw Hough circles (all detected fruits)
-    for (x, y, r) in hough_circles:
-        cv2.circle(out, (x, y), r, (22, 163, 74), 2)
-        cv2.circle(out, (x, y), 2, (255, 255, 255), -1)
-    return out
+        cv2.drawContours(annotated, [basket_contour], -1, (59,130,246), 2)
+
+    # Draw box + number on each detected fruit
+    for i, cnt in enumerate(valid_cnts):
+        x,y,w,h = cv2.boundingRect(cnt)
+        p=6; x=max(0,x-p); y=max(0,y-p)
+        w=min(img_blur.shape[1]-x,w+2*p); h=min(img_blur.shape[0]-y,h+2*p)
+        cv2.rectangle(annotated,(x,y),(x+w,y+h),(22,163,74),2)
+        cv2.putText(annotated,f"#{i+1}",(x+4,y+20),
+                    cv2.FONT_HERSHEY_SIMPLEX,0.55,(22,163,74),2)
+
+    return all_features, valid_cnts, annotated
 
 
-def show_results(all_features, predictions, total_count, per_layer, layers):
-    visible     = len(predictions)
-    avg_juice   = sum(predictions) / visible if visible > 0 else 0
-    total_juice = avg_juice * total_count
-
+def show_results(all_features, predictions):
+    fruit_count = len(predictions)
+    total_juice = sum(predictions)
+    avg_juice   = total_juice / fruit_count if fruit_count > 0 else 0
     label, color, desc = get_ripeness(all_features)
 
     # Detection banner
@@ -118,26 +130,20 @@ def show_results(all_features, predictions, total_count, per_layer, layers):
         <span style="font-size:22px;font-weight:bold;color:#166534;">🍋 Calamansi Detected</span>
         &nbsp;<span style="font-size:14px;color:#6b7280;">Citrus microcarpa</span><br><br>
         <span style="font-size:16px;font-weight:bold;color:{color};">{label}</span>
-        &nbsp;—&nbsp;<span style="font-size:14px;color:#6b7280;">{desc}</span><br>
-        <span style="font-size:13px;color:#6b7280;">
-            🔬 {per_layer} fruits per layer × {layers} layers = {total_count} estimated total
-            &nbsp;|&nbsp; Representative sampling method
-        </span>
+        &nbsp;—&nbsp;<span style="font-size:14px;color:#6b7280;">{desc}</span>
     </div>
     """, unsafe_allow_html=True)
 
     # Metrics
-    st.markdown('<div class="section-header">📊 Prediction Results</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔬 Fruits Per Layer",   f"{per_layer} fruits",   help="Estimated fruits in one layer")
-    c2.metric("🧺 Estimated Total",    f"{total_count} fruits", help="Per layer × number of layers")
-    c3.metric("📊 Avg Juice per Fruit",f"{avg_juice:.2f} mL",   help="Based on visible top-layer fruits")
-    c4.metric("💧 Total Juice Yield",  f"{total_juice:.2f} mL", help="Avg juice × total estimated count")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🍊 Fruits Detected",    f"{fruit_count}")
+    c2.metric("📊 Avg Juice per Fruit", f"{avg_juice:.2f} mL")
+    c3.metric("💧 Total Juice Yield",   f"{total_juice:.2f} mL")
 
-    # Big result
+    # Big result box
     st.markdown(f"""
     <div class="total-box">
-        <span style="font-size:16px;color:#bbf7d0;">🧺 Basket of ~{total_count} Calamansi Fruits</span><br>
+        <span style="font-size:16px;color:#bbf7d0;">🍋 {fruit_count} Calamansi Fruits Detected</span><br>
         <span style="font-size:40px;font-weight:bold;color:#ffffff;">💧 {total_juice:.2f} mL</span><br>
         <span style="font-size:14px;color:#bbf7d0;">Estimated Total Juice Yield</span>
     </div>
@@ -145,34 +151,33 @@ def show_results(all_features, predictions, total_count, per_layer, layers):
 
     st.divider()
 
-    # Per-fruit table (visible)
-    st.markdown(f'<div class="section-header">🍋 Visible Fruits Breakdown ({visible} detected)</div>', unsafe_allow_html=True)
-    st.caption("Representative sample — visible top-layer fruits used to estimate average juice yield for the entire basket.")
+    # Per fruit table
+    st.markdown('<div class="section-header">🍋 Per Fruit Breakdown</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame({
-        "Fruit":                [f"#{i+1}" for i in range(visible)],
+        "Fruit":               [f"#{i+1}" for i in range(fruit_count)],
         "Predicted Juice (mL)":[f"{p:.2f}" for p in predictions],
-        "Diameter (cm)":       [f"{all_features[i]['diameter_cm']:.2f}" for i in range(visible)],
-        "Area (cm²)":          [f"{all_features[i]['area_cm2']:.2f}" for i in range(visible)],
-        "Ripeness":            [
-            "🟠 Ripe"    if all_features[i]['mean_hue'] < 25 else
-            "🟡 Turning" if all_features[i]['mean_hue'] < 50 else
-            "🟢 Green"
-            for i in range(visible)
-        ],
+        "Diameter (cm)":       [f"{all_features[i]['diameter_cm']:.2f}" for i in range(fruit_count)],
+        "Area (cm²)":          [f"{all_features[i]['area_cm2']:.2f}" for i in range(fruit_count)],
+        "Ripeness":            ["🟠 Ripe" if all_features[i]['mean_hue']<25
+                                else "🟡 Turning" if all_features[i]['mean_hue']<50
+                                else "🟢 Green" for i in range(fruit_count)],
     }), width='stretch', hide_index=True)
 
+    # Chart
     st.divider()
-    st.markdown('<div class="section-header">📈 Juice Yield per Visible Fruit</div>', unsafe_allow_html=True)
-    fig, ax = plt.subplots(figsize=(max(6, visible * 0.7), 4))
-    bars = ax.bar([f"#{i+1}" for i in range(visible)], predictions, color='#16a34a', edgecolor='white')
-    ax.axhline(avg_juice, color='red', linestyle='--', lw=1.5, label=f'Avg = {avg_juice:.2f} mL')
+    st.markdown('<div class="section-header">📈 Juice Yield per Fruit</div>', unsafe_allow_html=True)
+    fig, ax = plt.subplots(figsize=(max(6, fruit_count*0.7), 4))
+    bars = ax.bar([f"#{i+1}" for i in range(fruit_count)], predictions,
+                  color='#16a34a', edgecolor='white')
+    ax.axhline(avg_juice, color='red', linestyle='--', lw=1.5,
+               label=f'Avg = {avg_juice:.2f} mL')
     ax.set_xlabel('Fruit'); ax.set_ylabel('Predicted Juice (mL)')
-    ax.set_title(f'Visible: {visible} fruits | Est. Total: {total_count} | Total Juice: {total_juice:.2f} mL')
+    ax.set_title(f'{fruit_count} fruits | Total: {total_juice:.2f} mL')
     ax.legend()
     for bar, val in zip(bars, predictions):
-        ax.text(bar.get_x()+bar.get_width()/2, val+0.05, f'{val:.2f}', ha='center', fontsize=9)
-    plt.tight_layout()
-    st.pyplot(fig)
+        ax.text(bar.get_x()+bar.get_width()/2, val+0.05,
+                f'{val:.2f}', ha='center', fontsize=9)
+    plt.tight_layout(); st.pyplot(fig)
 
 
 # ══════════════════════════════════════════════════════
@@ -187,23 +192,17 @@ if page == "🏠 Home":
     with col1:
         st.markdown('<div class="section-header">📌 About This System</div>', unsafe_allow_html=True)
         st.write("""
-        This system predicts the **juice yield (mL)** of Calamansi fruits
-        *(Citrus microcarpa)* using video processing and linear regression.
-        Record a short top-down video of your calamansi basket, select how many
-        layers deep the fruits are stacked, and the system will estimate the
-        **total fruit count** and predict the **total juice yield** of the entire basket.
-
-        The system uses **representative sampling** — the visible top-layer fruits
-        serve as a sample to estimate the average juice yield for all fruits in the basket,
-        following the same principle used in blood tests and quality control sampling.
+        This system predicts the **juice yield (mL)** of Calamansi fruits *(Citrus microcarpa)*
+        using video processing and linear regression. Spread the calamansi flat in a basket,
+        record a short top-down video, and the system automatically picks the best frame,
+        detects each individual fruit with a numbered box, and predicts the juice yield per fruit.
         """)
         st.markdown('<div class="section-header">🎯 Objectives</div>', unsafe_allow_html=True)
         st.write("**1.** Collect and process calamansi fruit images for model training.")
         st.write("**2.** Extract image-based features such as size, shape, and color.")
         st.write("**3.** Train a Linear Regression model to predict juice yield per fruit.")
         st.write("**4.** Implement video-based calamansi detection using color, shape, and size filtering.")
-        st.write("**5.** Estimate total fruit count using per-layer counting and representative sampling.")
-        st.write("**6.** Deploy as a web-based system that outputs total count and predicted juice yield.")
+        st.write("**5.** Deploy as a web-based system outputting detected count and total juice yield.")
 
     with col2:
         st.markdown('<div class="section-header">📐 System Scope</div>', unsafe_allow_html=True)
@@ -212,22 +211,14 @@ if page == "🏠 Home":
         |------|--------|
         | Fruit | Calamansi *(Citrus microcarpa)* |
         | Input | Video (MP4, MOV, AVI) |
-        | Setup | Basket or container |
-        | Method | Representative sampling |
-        | Output | Total count + total juice yield |
+        | Setup | Spread flat in basket/container |
+        | Output | Count + juice per fruit + total |
         | Model | Linear Regression |
         | Features | Shape + Color |
         """)
-        st.markdown('<div class="section-header">🔬 Representative Sampling</div>', unsafe_allow_html=True)
-        st.info("""
-        The visible top-layer fruits are used as a **representative sample**
-        to estimate average juice yield for the entire basket.
-        This is the same principle used in blood tests, water quality testing,
-        and agricultural yield estimation.
-        """)
 
     st.divider()
-    st.markdown('<div class="section-header">🍋 What is Calamansi? (Citrus microcarpa)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">🍋 What is Calamansi?</div>', unsafe_allow_html=True)
     c1, c2 = st.columns([1, 2])
     with c1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg",
@@ -236,36 +227,31 @@ if page == "🏠 Home":
         st.markdown("""
         Calamansi is a small citrus fruit native to the Philippines, commonly used for juice.
 
-        **Physical characteristics:**
-        - **Shape:** Round, spherical
-        - **Size:** 2 to 4 cm in diameter
-        - **Color:** Green when unripe, yellow-orange when ripe
-
-        **Ripeness stages detected by this system:**
+        **Detection filters (calamansi-specific):**
+        - **Color:** Green (HSV) or yellow-orange when ripe
+        - **Shape:** Circularity ≥ 0.25 (round)
+        - **Size:** Diameter 1.5–5.5 cm
 
         | Stage | Color | Description |
         |-------|-------|-------------|
-        | 🟢 Green | Dark green | Unripe, more acidic |
+        | 🟢 Green | Dark green | Unripe |
         | 🟡 Turning | Yellow-green | Partially ripe |
-        | 🟠 Ripe | Yellow-orange | Fully ripe, sweeter |
-
-        **Detection filters (calamansi-specific):**
-        Size: 1.5–5.5 cm diameter &nbsp;|&nbsp; Shape: circularity ≥ 0.25 &nbsp;|&nbsp; Color: green/yellow-orange HSV
+        | 🟠 Ripe | Yellow-orange | Fully ripe |
         """)
 
     st.divider()
     st.markdown('<div class="section-header">⚙️ How the System Works</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1,c2,c3,c4,c5 = st.columns(5)
     with c1:
-        st.markdown('<div class="step-box">📹 <b>Step 1</b><br>Upload top-down video of calamansi basket</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">🧺 <b>Step 1</b><br>Spread calamansi flat in a basket so each fruit is visible</div>', unsafe_allow_html=True)
     with c2:
-        st.markdown('<div class="step-box">🔢 <b>Step 2</b><br>Select number of fruit layers in the basket</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">📹 <b>Step 2</b><br>Record a short top-down video while spreading the fruits</div>', unsafe_allow_html=True)
     with c3:
-        st.markdown('<div class="step-box">🔬 <b>Step 3</b><br>System detects visible fruits, counts per layer, estimates total</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">🔬 <b>Step 3</b><br>System picks best frame — detects each fruit with a numbered box</div>', unsafe_allow_html=True)
     with c4:
-        st.markdown('<div class="step-box">📐 <b>Step 4</b><br>Extract shape and color features from visible fruits</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">📐 <b>Step 4</b><br>Extracts size, shape, color features per fruit</div>', unsafe_allow_html=True)
     with c5:
-        st.markdown('<div class="step-box">💧 <b>Step 5</b><br>Predict avg juice × total count = total yield</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-box">💧 <b>Step 5</b><br>Linear Regression predicts juice per fruit → total yield</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════
@@ -273,7 +259,7 @@ if page == "🏠 Home":
 # ══════════════════════════════════════════════════════
 elif page == "🔍 Predict Juice Yield":
     st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Record a video of your basket — system detects everything automatically</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Spread calamansi flat in a basket and record a top-down video</div>', unsafe_allow_html=True)
     st.divider()
 
     if not model_loaded:
@@ -282,11 +268,11 @@ elif page == "🔍 Predict Juice Yield":
 
     st.markdown("""
     **How to record:**
-    1. **Top view (3–5 sec):** Hold camera directly above the basket looking straight down
-    2. **Tilt slowly to side (2–3 sec):** Show the basket wall and how high fruits are stacked
-    3. Keep the whole basket in frame throughout
+    1. Spread calamansi in a basket — each fruit should be visible from above
+    2. Hold camera **directly above** looking straight down
+    3. Record **3–10 seconds** while spreading and adjusting fruits
+    4. Upload below — system picks the frame where most fruits are visible
     """)
-    st.info("📐 System automatically finds top and side frames — no inputs needed.")
 
     uploaded_video = st.file_uploader("📹 Upload video (MP4, MOV, AVI)", type=['mp4','mov','avi','m4v'])
 
@@ -304,69 +290,72 @@ elif page == "🔍 Predict Juice Yield":
             os.unlink(tmp_path)
             st.stop()
 
-        frame_indices = list(range(0, total_frames, max(1, int(fps))))[:15]
-        st.info(f"📹 {total_frames} frames at {fps:.0f} fps — analyzing {len(frame_indices)} frames")
+        frame_indices = list(range(0, total_frames, max(1, int(fps))))[:20]
+        st.info(f"📹 {total_frames} frames at {fps:.0f} fps — processing {len(frame_indices)} frames")
 
-        progress   = st.progress(0, text="Loading frames...")
-        frames_rgb = []
+        # Real-time frame display
+        st.markdown('<div class="section-header">🎬 Live Detection</div>', unsafe_allow_html=True)
+        frame_display = st.empty()
+        status_text   = st.empty()
+
+        best_frame_rgb = None
+        best_count     = 0
+        best_features  = []
+        best_annotated = None
+
         for idx, fn in enumerate(frame_indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, fn)
             ret, frame = cap.read()
-            if ret:
-                frames_rgb.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            progress.progress((idx+1)/len(frame_indices), text=f"Frame {idx+1}/{len(frame_indices)}...")
+            if not ret:
+                continue
 
-        cap.release(); os.unlink(tmp_path); progress.empty()
+            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        with st.spinner("🔬 Detecting calamansi and analyzing..."):
-            result = process_video_frames(frames_rgb)
+            # Run detection on this frame
+            all_features, valid_cnts, annotated = detect_on_frame(img_rgb)
 
-        if result is None or not result['features']:
-            st.error("❌ No calamansi detected. Check lighting and make sure fruits are clearly visible.")
+            # Show annotated frame in real-time
+            frame_display.image(annotated, caption=f"Frame {idx+1}/{len(frame_indices)} — {len(all_features)} fruits detected", width='stretch')
+            status_text.markdown(f"🔬 Scanning... **{len(all_features)} calamansi** detected in this frame")
+
+            # Track best frame
+            if len(all_features) > best_count:
+                best_count     = len(all_features)
+                best_frame_rgb = img_rgb
+                best_features  = all_features
+                best_annotated = annotated
+
+        cap.release(); os.unlink(tmp_path)
+
+        if not best_features:
+            frame_display.empty(); status_text.empty()
+            st.error("❌ No calamansi detected. Make sure fruits are spread flat and well-lit.")
             st.stop()
 
-        predictions = predict_from_features(result['features'])
+        status_text.empty()
+        frame_display.empty()
 
-        if result['side_frames'] > 0:
-            st.success(f"✅ {result['per_layer']} per layer × {result['layers']} layers = ~{result['total_count']} total fruits")
-        else:
-            st.success(f"✅ {result['hough_count']} fruits detected in top view")
-            st.warning("⚠️ No side view detected — tilt camera to show basket side for accurate layer count.")
+        st.success(f"✅ Done! Best frame has {best_count} fruits detected")
 
-        annotated = annotate_image(
-            result['img_blur'], result['contours'],
-            result['basket_contour'], result['hough_circles']
-        )
-
-        # Show top frame, annotated side, detected
-        c1, c2, c3 = st.columns(3)
+        # Show best frame side by side
+        c1, c2 = st.columns(2)
         with c1:
-            st.markdown('<div class="section-header">📷 Top View Frame</div>', unsafe_allow_html=True)
-            st.image(result['img_blur'], width='stretch')
+            st.markdown('<div class="section-header">📹 Best Frame (Original)</div>', unsafe_allow_html=True)
+            st.image(preprocess_array(best_frame_rgb), width='stretch')
         with c2:
-            st.markdown(f'<div class="section-header">📷 Side View — {result["layers"]} layers</div>', unsafe_allow_html=True)
-            side_display = result.get('annotated_side', result['img_blur'])
-            st.image(side_display, width='stretch')
-            height_cm = result.get('height_cm', 0)
-            if height_cm > 0:
-                st.caption(f"🔴 Red line = basket rim | {height_cm:.1f}cm ÷ 2.5cm = {result['layers']} layers")
-            else:
-                st.caption("No side frame detected in video")
-        with c3:
-            st.markdown(f'<div class="section-header">🔬 Detected ({result["hough_count"]} inside basket)</div>', unsafe_allow_html=True)
-            st.image(annotated, width='stretch')
+            st.markdown(f'<div class="section-header">🔬 Detected ({best_count} fruits)</div>', unsafe_allow_html=True)
+            st.image(best_annotated, width='stretch')
 
         st.markdown("""
         <small style="color:#6b7280;">
-        🟢 Green circles = detected calamansi &nbsp;|&nbsp; 🔵 Blue outline = basket boundary
+        🟢 Green boxes = detected calamansi with individual numbers &nbsp;|&nbsp;
+        🔵 Blue outline = basket boundary
         </small>
         """, unsafe_allow_html=True)
 
         st.divider()
-        show_results(
-            result['features'], predictions,
-            result['total_count'], result['per_layer'], result['layers']
-        )
+        predictions = predict_from_features(best_features)
+        show_results(best_features, predictions)
 
 
 # ══════════════════════════════════════════════════════
@@ -393,58 +382,55 @@ elif page == "📊 Model Performance":
     r2     = r2_score(y, y_pred)
 
     st.markdown('<div class="section-header">📐 Evaluation Metrics</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     c1.metric("Total Samples", f"{len(df)}")
-    c2.metric("R² Score",      f"{r2:.4f}",     help="Closer to 1.0 is better")
-    c3.metric("MAE",           f"{mae:.4f} mL",  help="Mean Absolute Error")
-    c4.metric("RMSE",          f"{rmse:.4f} mL", help="Root Mean Squared Error")
+    c2.metric("R² Score",      f"{r2:.4f}")
+    c3.metric("MAE",           f"{mae:.4f} mL")
+    c4.metric("RMSE",          f"{rmse:.4f} mL")
 
     st.divider()
-    st.markdown('<div class="section-header">📈 Actual vs Predicted & Residuals</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     with col1:
-        fig1, ax1 = plt.subplots(figsize=(6, 5))
+        fig1, ax1 = plt.subplots(figsize=(6,5))
         ax1.scatter(y, y_pred, color='steelblue', alpha=0.7, edgecolors='white', s=60)
-        mn, mx = min(y.min(), y_pred.min())-0.5, max(y.max(), y_pred.max())+0.5
+        mn,mx = min(y.min(),y_pred.min())-0.5, max(y.max(),y_pred.max())+0.5
         ax1.plot([mn,mx],[mn,mx],'r--',lw=2,label='Perfect Prediction')
         ax1.set_xlabel('Actual (mL)'); ax1.set_ylabel('Predicted (mL)')
         ax1.set_title('Actual vs Predicted'); ax1.legend()
-        ax1.text(0.05, 0.92, f'R²={r2:.4f}', transform=ax1.transAxes, fontsize=10,
-                 color='darkred', bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+        ax1.text(0.05,0.92,f'R²={r2:.4f}',transform=ax1.transAxes,fontsize=10,
+                 color='darkred',bbox=dict(boxstyle='round',facecolor='lightyellow',alpha=0.8))
         plt.tight_layout(); st.pyplot(fig1)
     with col2:
-        fig2, ax2 = plt.subplots(figsize=(6, 5))
+        fig2, ax2 = plt.subplots(figsize=(6,5))
         ax2.scatter(y_pred, y-y_pred, color='darkorange', alpha=0.7, edgecolors='white', s=60)
-        ax2.axhline(0, color='red', linestyle='--', lw=2)
+        ax2.axhline(0,color='red',linestyle='--',lw=2)
         ax2.set_xlabel('Predicted (mL)'); ax2.set_ylabel('Residuals (mL)')
         ax2.set_title('Residuals vs Fitted')
         plt.tight_layout(); st.pyplot(fig2)
 
     st.divider()
-    st.markdown('<div class="section-header">🔥 Correlation Heatmap & Feature Coefficients</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     with col1:
-        fig3, ax3 = plt.subplots(figsize=(7, 6))
+        fig3, ax3 = plt.subplots(figsize=(7,6))
         corr = df[FEATURE_COLS+['juice_ml']].corr()
-        sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm',
-                    mask=np.triu(np.ones_like(corr, dtype=bool)),
-                    square=True, linewidths=0.5, ax=ax3, cbar_kws={"shrink": 0.8})
+        sns.heatmap(corr,annot=True,fmt='.2f',cmap='coolwarm',
+                    mask=np.triu(np.ones_like(corr,dtype=bool)),
+                    square=True,linewidths=0.5,ax=ax3,cbar_kws={"shrink":0.8})
         ax3.set_title('Feature Correlation Heatmap')
         plt.tight_layout(); st.pyplot(fig3)
     with col2:
-        coef_df = pd.DataFrame({'Feature': FEATURE_COLS, 'Coefficient': model.coef_}).sort_values('Coefficient', ascending=True)
-        colors  = ['#d73027' if c < 0 else '#1a9850' for c in coef_df['Coefficient']]
-        fig4, ax4 = plt.subplots(figsize=(7, 6))
-        ax4.barh(coef_df['Feature'], coef_df['Coefficient'], color=colors, edgecolor='white')
-        ax4.axvline(0, color='black', linewidth=0.8)
+        coef_df = pd.DataFrame({'Feature':FEATURE_COLS,'Coefficient':model.coef_}).sort_values('Coefficient',ascending=True)
+        colors  = ['#d73027' if c<0 else '#1a9850' for c in coef_df['Coefficient']]
+        fig4, ax4 = plt.subplots(figsize=(7,6))
+        ax4.barh(coef_df['Feature'],coef_df['Coefficient'],color=colors,edgecolor='white')
+        ax4.axvline(0,color='black',linewidth=0.8)
         ax4.set_xlabel('Coefficient Value'); ax4.set_title('Feature Coefficients')
-        for bar, val in zip(ax4.patches, coef_df['Coefficient']):
-            ax4.text(val+(0.005 if val>=0 else -0.005), bar.get_y()+bar.get_height()/2,
-                     f'{val:.3f}', va='center', ha='left' if val>=0 else 'right', fontsize=9)
+        for bar,val in zip(ax4.patches,coef_df['Coefficient']):
+            ax4.text(val+(0.005 if val>=0 else -0.005),bar.get_y()+bar.get_height()/2,
+                     f'{val:.3f}',va='center',ha='left' if val>=0 else 'right',fontsize=9)
         plt.tight_layout(); st.pyplot(fig4)
 
     st.divider()
-    st.markdown('<div class="section-header">🔁 5-Fold Cross Validation</div>', unsafe_allow_html=True)
     with st.spinner("Running cross validation..."):
         kf     = KFold(n_splits=5, shuffle=True, random_state=42)
         cv_r2  = cross_val_score(model, X_sc, y, cv=kf, scoring='r2')
@@ -454,18 +440,17 @@ elif page == "📊 Model Performance":
         st.metric("Mean R² (CV)",  f"{cv_r2.mean():.4f}",     f"± {cv_r2.std():.4f}")
         st.metric("Mean MAE (CV)", f"{cv_mae.mean():.4f} mL", f"± {cv_mae.std():.4f}")
     with col2:
-        fig5, ax5 = plt.subplots(figsize=(6, 4))
-        ax5.bar([f'Fold {i+1}' for i in range(5)], cv_r2, color='steelblue', edgecolor='white')
-        ax5.axhline(cv_r2.mean(), color='red', linestyle='--', lw=2, label=f'Mean={cv_r2.mean():.4f}')
-        ax5.set_ylim(0, 1.05); ax5.set_ylabel('R² Score')
+        fig5, ax5 = plt.subplots(figsize=(6,4))
+        ax5.bar([f'Fold {i+1}' for i in range(5)],cv_r2,color='steelblue',edgecolor='white')
+        ax5.axhline(cv_r2.mean(),color='red',linestyle='--',lw=2,label=f'Mean={cv_r2.mean():.4f}')
+        ax5.set_ylim(0,1.05); ax5.set_ylabel('R² Score')
         ax5.set_title('5-Fold Cross Validation'); ax5.legend()
-        for i, v in enumerate(cv_r2):
-            ax5.text(i, v+0.01, f'{v:.3f}', ha='center', fontsize=10)
+        for i,v in enumerate(cv_r2):
+            ax5.text(i,v+0.01,f'{v:.3f}',ha='center',fontsize=10)
         plt.tight_layout(); st.pyplot(fig5)
 
     st.divider()
-    st.markdown('<div class="section-header">📝 Linear Regression Equation</div>', unsafe_allow_html=True)
     eq = f"juice_ml = {model.intercept_:.4f}"
-    for feat, coef in zip(FEATURE_COLS, model.coef_):
+    for feat,coef in zip(FEATURE_COLS,model.coef_):
         eq += f" {'+'if coef>=0 else'-'} {abs(coef):.4f} × {feat}"
     st.code(eq, language=None)

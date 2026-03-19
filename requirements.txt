@@ -8,3 +8,5 @@ seaborn
 Pillow
 joblib
 altair>=5.0.0
+streamlit-webrtc
+av
