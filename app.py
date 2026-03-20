@@ -12,7 +12,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import cross_val_score, KFold
 
 from feature_extraction import preprocess_array, segment_fruit, get_fruit_features, \
-    detect_basket, calibrate_ppc, count_hough, FEATURE_COLS
+    calibrate_ppc, count_hough, FEATURE_COLS
 
 st.set_page_config(
     page_title="Calamansi Juice Yield Prediction System",
@@ -73,10 +73,9 @@ def predict_from_features(all_features):
     for f in all_features:
         X    = np.array([[f[col] for col in FEATURE_COLS]])
         pred = model.predict(scaler.transform(X))[0]
-        preds.append(max(pred, 1.0))
-    avg = sum(preds)/len(preds) if preds else 0
-    if avg < 3.6 or avg > 7.2:
-        preds = [TRAINING_AVG] * len(preds)
+        # Clamp to training data range only
+        pred = max(3.6, min(7.2, pred))
+        preds.append(pred)
     return preds
 
 
@@ -98,15 +97,10 @@ def detect_on_frame(img_rgb):
     mask, hsv         = segment_fruit(img_blur)
     circles           = count_hough(img_blur, mask)
     ppc               = calibrate_ppc(circles) if circles else 41.0
-    basket_contour, _ = detect_basket(img_blur)
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
-    # Draw basket boundary
+    # Annotate — draw box + number on each detected fruit
     annotated = img_blur.copy()
-    if basket_contour is not None:
-        cv2.drawContours(annotated, [basket_contour], -1, (59,130,246), 2)
-
-    # Draw box + number on each detected fruit
     for i, cnt in enumerate(valid_cnts):
         x,y,w,h = cv2.boundingRect(cnt)
         p=6; x=max(0,x-p); y=max(0,y-p)
@@ -348,8 +342,7 @@ elif page == "🔍 Predict Juice Yield":
 
         st.markdown("""
         <small style="color:#6b7280;">
-        🟢 Green boxes = detected calamansi with individual numbers &nbsp;|&nbsp;
-        🔵 Blue outline = basket boundary
+        🟢 Green boxes = detected calamansi with individual numbers
         </small>
         """, unsafe_allow_html=True)
 
