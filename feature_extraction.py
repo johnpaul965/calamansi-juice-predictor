@@ -221,7 +221,7 @@ def count_hough(img_blur, mask):
     bright_thresh = min(155, int(mean_v + 10))
     hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
     circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2,
-        minDist=20, param1=50, param2=28, minRadius=8, maxRadius=45)
+        minDist=35, param1=50, param2=28, minRadius=10, maxRadius=45)
     if circles is None:
         return []
     circles = np.round(circles[0,:]).astype("int")
