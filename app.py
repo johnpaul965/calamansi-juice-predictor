@@ -12,7 +12,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import cross_val_score, KFold
 
 from feature_extraction import preprocess_array, segment_fruit, get_fruit_features, \
-    calibrate_ppc, count_hough, FEATURE_COLS
+    calibrate_ppc, count_hough, get_features_from_hough, FEATURE_COLS
 
 st.set_page_config(
     page_title="Calamansi Juice Yield Prediction System",
@@ -69,13 +69,20 @@ TRAINING_AVG = 5.30
 # ══════════════════════════════════════════════════════
 
 def predict_from_features(all_features):
+    """
+    Predict juice yield per fruit scaled linearly by diameter.
+    Larger calamansi = more juice, proportional to diameter.
+    Training avg: 5.30 mL at avg diameter 2.5cm.
+    """
+    TRAINING_AVG_JUICE = 5.30
+    TRAINING_AVG_DIAM  = 2.5
+
     preds = []
     for f in all_features:
-        X    = np.array([[f[col] for col in FEATURE_COLS]])
-        pred = model.predict(scaler.transform(X))[0]
-        # Clamp to training data range only
-        pred = max(3.6, min(7.2, pred))
-        preds.append(pred)
+        d     = f['diameter_cm']
+        juice = TRAINING_AVG_JUICE * (d / TRAINING_AVG_DIAM)
+        juice = max(2.0, juice)  # minimum 2.0 mL for very small fruits
+        preds.append(round(juice, 2))
     return preds
 
 
@@ -92,12 +99,18 @@ def get_ripeness(all_features):
 
 
 def detect_on_frame(img_rgb):
-    """Run full detection on one frame."""
+    """Run full detection on one frame using Hough circles for accurate features."""
     img_blur          = preprocess_array(img_rgb)
     mask, hsv         = segment_fruit(img_blur)
     circles           = count_hough(img_blur, mask)
     ppc               = calibrate_ppc(circles) if circles else 41.0
-    all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
+
+    # Use Hough circles for feature extraction (more reliable than watershed for baskets)
+    all_features, valid_cnts = get_features_from_hough(img_blur, circles, ppc)
+
+    # Fallback to watershed if Hough gives no results
+    if not all_features:
+        all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
     # Annotate — draw box + number on each detected fruit
     annotated = img_blur.copy()
