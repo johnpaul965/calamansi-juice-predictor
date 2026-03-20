@@ -52,11 +52,16 @@ def segment_fruit(img_blur):
 
 
 def detect_basket(img_blur):
+    """Detect basket/container boundary. Falls back to largest contour."""
     gray  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(cv2.GaussianBlur(gray,(7,7),0), 30, 100)
+    H, W  = img_blur.shape[:2]
+
+    # Try Canny edge detection
+    edges = cv2.Canny(cv2.GaussianBlur(gray,(7,7),0), 20, 80)
     edges = cv2.dilate(edges, np.ones((5,5),np.uint8), iterations=2)
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    img_area = img_blur.shape[0] * img_blur.shape[1]
+
+    img_area = H * W
     best, best_area = None, 0
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -64,6 +69,19 @@ def detect_basket(img_blur):
             continue
         if area > best_area:
             best_area = area; best = cnt
+
+    # Fallback: draw a border rectangle slightly inside the image
+    if best is None:
+        margin = int(min(H, W) * 0.05)
+        pts = np.array([
+            [[margin, margin]],
+            [[W-margin, margin]],
+            [[W-margin, H-margin]],
+            [[margin, H-margin]]
+        ], dtype=np.int32)
+        best      = pts
+        best_area = (W - 2*margin) * (H - 2*margin)
+
     return best, best_area
 
 
@@ -136,6 +154,59 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
 
 
 def calibrate_ppc(hough_circles):
+    """Estimate pixels/cm from visible fruit size (avg calamansi diameter = 2.5cm)."""
+    if not hough_circles:
+        return PIXELS_PER_CM
+    avg_r_px = np.mean([r for _,_,r in hough_circles])
+    return max(avg_r_px / 1.25, 5.0)
+
+
+def get_features_from_hough(img_blur, circles, ppc):
+    """
+    Extract features directly from Hough circles.
+    More reliable than watershed for basket videos
+    because it uses the detected circle as the fruit boundary.
+    """
+    hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    feats, cnts = [], []
+
+    for x, y, r in circles:
+        diam_cm  = (2*r) / ppc
+        if not (MIN_DIAMETER_CM <= diam_cm <= MAX_DIAMETER_CM):
+            continue
+
+        area_px  = np.pi * r**2
+        peri_px  = 2 * np.pi * r
+        area_cm2 = area_px / (ppc**2)
+        peri_cm  = peri_px / ppc
+        circ     = 1.0  # Hough circles are perfect circles
+        vol      = (4/3) * np.pi * (diam_cm/2)**3
+
+        # Sample HSV in circle region
+        mask_c = np.zeros(img_blur.shape[:2], dtype=np.uint8)
+        cv2.circle(mask_c, (x, y), r, 255, -1)
+        px = hsv[mask_c > 0]
+        if len(px) == 0:
+            continue
+
+        feats.append({
+            'area_cm2':             area_cm2,
+            'diameter_cm':          diam_cm,
+            'perimeter_cm':         peri_cm,
+            'circularity':          circ,
+            'estimated_volume_cm3': vol,
+            'mean_hue':             np.mean(px[:, 0]),
+            'mean_saturation':      np.mean(px[:, 1]),
+            'mean_value':           np.mean(px[:, 2]),
+        })
+
+        # Approximate contour from circle for display
+        theta = np.linspace(0, 2*np.pi, 20)
+        pts   = np.array([[[int(x+r*np.cos(t)), int(y+r*np.sin(t))]] for t in theta],
+                         dtype=np.int32)
+        cnts.append(pts)
+
+    return feats, cnts
     """Estimate pixels/cm from visible fruit size (2.5cm avg diameter)."""
     if not hough_circles:
         return PIXELS_PER_CM
