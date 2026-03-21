@@ -52,7 +52,7 @@ model_loaded = os.path.exists('juice_yield_model.pkl') and os.path.exists('scale
 if model_loaded:
     model, scaler = load_model()
 
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg", width='stretch')
+st.sidebar.markdown("# 🍋")
 st.sidebar.markdown("## 🍋 Navigation")
 page = st.sidebar.radio("Go to", ["🏠 Home", "🔍 Predict Juice Yield", "📊 Model Performance"])
 st.sidebar.markdown("---")
@@ -228,8 +228,8 @@ if page == "🏠 Home":
     st.markdown('<div class="section-header">🍋 What is Calamansi?</div>', unsafe_allow_html=True)
     c1, c2 = st.columns([1, 2])
     with c1:
-        st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Calamansi.jpg/320px-Calamansi.jpg",
-                 caption="Calamansi (Citrus microcarpa)", width='stretch')
+        st.markdown('<div style="font-size:120px;text-align:center;">🍋</div>', unsafe_allow_html=True)
+        st.caption("Calamansi (Citrus microcarpa)")
     with c2:
         st.markdown("""
         Calamansi is a small citrus fruit native to the Philippines, commonly used for juice.
