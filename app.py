@@ -4,10 +4,14 @@ import pandas as pd
 import joblib
 import os
 import cv2
-import tempfile
+import sqlite3
+import hashlib
+import threading
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import cross_val_score, KFold
 
@@ -41,9 +45,173 @@ st.markdown("""
         background-color:#166534; border-radius:12px;
         padding:20px; margin:16px 0; text-align:center;
     }
+    .recipe-box {
+        background-color:#fffbeb; border:1px solid #fde68a;
+        border-radius:10px; padding:16px; margin-bottom:12px;
+    }
+    .recipe-ok  { color:#16a34a; font-weight:bold; }
+    .recipe-no  { color:#dc2626; font-weight:bold; }
+    .auth-container {
+        max-width:420px; margin:40px auto;
+        background:#f0fdf4; border:2px solid #16a34a;
+        border-radius:14px; padding:32px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# ══════════════════════════════════════════════════════
+# USER DATABASE (JSON file)
+# ══════════════════════════════════════════════════════
+DB_FILE = "users.db"
+
+def init_db():
+    """Initialize SQLite database and create users table if not exists."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            role     TEXT NOT NULL DEFAULT 'user'
+        )
+    """)
+    # Create default admin account if not exists
+    admin_pass = hashlib.sha256("admin2024".encode()).hexdigest()
+    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
+              ("admin", admin_pass, "admin"))
+    conn.commit()
+    conn.close()
+
+def get_user(username):
+    """Get user record by username. Returns dict or None."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT username, password, role FROM users WHERE username = ?", (username,))
+    row  = c.fetchone()
+    conn.close()
+    if row:
+        return {"username": row[0], "password": row[1], "role": row[2]}
+    return None
+
+def create_user(username, password, role="user"):
+    """Create new user. Returns True if success, False if username exists."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                  (username, password, role))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def hash_pw(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+# Initialize database on startup
+init_db()
+
+
+# ══════════════════════════════════════════════════════
+# AUTH PAGES
+# ══════════════════════════════════════════════════════
+def show_auth():
+    st.markdown('<div class="main-title">🍋 Calamansi Juice Yield Prediction System</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Development of an Image-Based System for Predicting Calamansi (Citrus microcarpa) Juice Yield Using Linear Regression</div>', unsafe_allow_html=True)
+    st.divider()
+
+    col1, col2, col3 = st.columns([1, 1.4, 1])
+    with col2:
+
+        # Toggle between User and Admin login
+        if "auth_mode" not in st.session_state:
+            st.session_state.auth_mode = "user"
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("👥 User Login", use_container_width=True,
+                         type="primary" if st.session_state.auth_mode == "user" else "secondary"):
+                st.session_state.auth_mode = "user"
+                st.rerun()
+        with c2:
+            if st.button("🔧 Admin Login", use_container_width=True,
+                         type="primary" if st.session_state.auth_mode == "admin" else "secondary"):
+                st.session_state.auth_mode = "admin"
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── USER LOGIN / REGISTER ──
+        if st.session_state.auth_mode == "user":
+            tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
+
+            with tab1:
+                st.markdown("#### User Login")
+                username = st.text_input("Username", key="login_user", placeholder="Enter username")
+                password = st.text_input("Password", type="password", key="login_pass", placeholder="Enter password")
+                if st.button("Login", type="primary", use_container_width=True, key="btn_login"):
+                    user = get_user(username)
+                    if user and user["password"] == hash_pw(password) and user["role"] == "user":
+                        st.session_state.logged_in = True
+                        st.session_state.username  = username
+                        st.session_state.role      = "user"
+                        st.rerun()
+                    elif user and user["role"] == "admin":
+                        st.error("❌ Use Admin Login for admin accounts.")
+                    else:
+                        st.error("❌ Invalid username or password.")
+
+            with tab2:
+                st.markdown("#### Create a New Account")
+                new_user  = st.text_input("Username", key="reg_user",  placeholder="Choose a username")
+                new_pass  = st.text_input("Password", type="password", key="reg_pass",  placeholder="Choose a password")
+                new_pass2 = st.text_input("Confirm Password", type="password", key="reg_pass2", placeholder="Repeat password")
+                if st.button("Register", type="primary", use_container_width=True, key="btn_register"):
+                    if not new_user or not new_pass:
+                        st.error("❌ Username and password are required.")
+                    elif new_pass != new_pass2:
+                        st.error("❌ Passwords do not match.")
+                    elif len(new_pass) < 6:
+                        st.error("❌ Password must be at least 6 characters.")
+                    elif get_user(new_user):
+                        st.error("❌ Username already exists.")
+                    else:
+                        success = create_user(new_user, hash_pw(new_pass), role="user")
+                        if success:
+                            st.success(f"✅ Account created! You can now login as **{new_user}**.")
+                        else:
+                            st.error("❌ Username already exists.")
+
+        # ── ADMIN LOGIN ──
+        else:
+            st.markdown("#### Admin Login")
+            st.info("🔧 This login is for system administrators only.")
+            admin_user = st.text_input("Admin Username", key="admin_user", placeholder="Enter admin username")
+            admin_pass = st.text_input("Admin Password", type="password", key="admin_pass", placeholder="Enter admin password")
+            if st.button("Admin Login", type="primary", use_container_width=True, key="btn_admin"):
+                user = get_user(admin_user)
+                if user and user["password"] == hash_pw(admin_pass) and user["role"] == "admin":
+                    st.session_state.logged_in = True
+                    st.session_state.username  = admin_user
+                    st.session_state.role      = "admin"
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid admin credentials.")
+
+
+
+# Check login state
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    show_auth()
+    st.stop()
+
+# ══════════════════════════════════════════════════════
+# MAIN APP
+# ══════════════════════════════════════════════════════
 @st.cache_resource
 def load_model():
     return joblib.load('juice_yield_model.pkl'), joblib.load('scaler.pkl')
@@ -52,15 +220,33 @@ model_loaded = os.path.exists('juice_yield_model.pkl') and os.path.exists('scale
 if model_loaded:
     model, scaler = load_model()
 
-st.sidebar.markdown("## 🍋 Navigation")
-page = st.sidebar.radio("Go to", ["🏠 Home", "🔍 Predict Juice Yield", "📊 Model Performance"])
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Capstone Project**")
-st.sidebar.markdown("Development of an Image-Based System for Predicting Calamansi (Citrus microcarpa) Juice Yield Using Linear Regression")
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Model Status:** {'✅ Loaded' if model_loaded else '❌ Not found — run train_model.py'}")
+role     = st.session_state.get("role", "guest")
+username = st.session_state.get("username", "Guest")
+
+# Sidebar
+with st.sidebar:
+    st.markdown("## Navigation")
+    if role == "admin":
+        pages = ["🏠 Home", "🔍 Predict Juice Yield", "📊 Model Performance"]
+    else:
+        pages = ["🏠 Home", "🔍 Predict Juice Yield"]
+    page = st.radio("Go to", pages)
+    st.markdown("---")
+    if role == "guest":
+        st.markdown("👤 **Guest**")
+    else:
+        st.markdown(f"👤 **{username}**")
+        st.markdown(f"🔑 Role: `{role}`")
+    st.markdown(f"**Model:** {'✅ Loaded' if model_loaded else '❌ Not found'}")
+    st.markdown("---")
+    if st.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username  = ""
+        st.session_state.role      = ""
+        st.rerun()
 
 TRAINING_AVG = 5.30
+RTC_CONFIG   = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
 
 # ══════════════════════════════════════════════════════
@@ -68,26 +254,18 @@ TRAINING_AVG = 5.30
 # ══════════════════════════════════════════════════════
 
 def predict_from_features(all_features):
-    """
-    Predict juice yield per fruit scaled linearly by diameter.
-    Larger calamansi = more juice, proportional to diameter.
-    Training avg: 5.30 mL at avg diameter 2.5cm.
-    """
     TRAINING_AVG_JUICE = 5.30
     TRAINING_AVG_DIAM  = 2.5
-
     preds = []
     for f in all_features:
-        d     = f['diameter_cm']
-        juice = TRAINING_AVG_JUICE * (d / TRAINING_AVG_DIAM)
-        juice = max(2.0, juice)  # minimum 2.0 mL for very small fruits
-        preds.append(round(juice, 2))
+        juice = TRAINING_AVG_JUICE * (f['diameter_cm'] / TRAINING_AVG_DIAM)
+        preds.append(round(max(2.0, juice), 2))
     return preds
 
 
 def get_ripeness(all_features):
     if not all_features:
-        return "🟢 Green Stage", "#16a34a", "Dark green — unripe calamansi."
+        return "🟢 Green Stage", "#16a34a", "Dark green — unripe."
     avg_hue = np.mean([f['mean_hue'] for f in all_features])
     if avg_hue < 25:
         return "🟠 Ripe Stage",    "#f97316", "Yellow-orange — fully ripe."
@@ -98,20 +276,14 @@ def get_ripeness(all_features):
 
 
 def detect_on_frame(img_rgb):
-    """Run full detection on one frame using Hough circles for accurate features."""
-    img_blur          = preprocess_array(img_rgb)
-    mask, hsv         = segment_fruit(img_blur)
-    circles           = count_hough(img_blur, mask)
-    ppc               = calibrate_ppc(circles) if circles else 41.0
-
-    # Use Hough circles for feature extraction (more reliable than watershed for baskets)
+    img_blur = preprocess_array(img_rgb)
+    mask, hsv = segment_fruit(img_blur)
+    circles   = count_hough(img_blur, mask)
+    ppc       = calibrate_ppc(circles) if circles else 41.0
     all_features, valid_cnts = get_features_from_hough(img_blur, circles, ppc)
-
-    # Fallback to watershed if Hough gives no results
     if not all_features:
         all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
-    # Annotate — draw box + number on each detected fruit
     annotated = img_blur.copy()
     for i, cnt in enumerate(valid_cnts):
         x,y,w,h = cv2.boundingRect(cnt)
@@ -120,17 +292,68 @@ def detect_on_frame(img_rgb):
         cv2.rectangle(annotated,(x,y),(x+w,y+h),(22,163,74),2)
         cv2.putText(annotated,f"#{i+1}",(x+4,y+20),
                     cv2.FONT_HERSHEY_SIMPLEX,0.55,(22,163,74),2)
-
     return all_features, valid_cnts, annotated
 
 
-def show_results(all_features, predictions):
+def show_juice_recommendations(total_ml, ripeness_label):
+    """Show what the user can make with their calamansi juice."""
+    st.markdown('<div class="section-header">🍹 Juice Usage Recommendations</div>', unsafe_allow_html=True)
+    st.markdown(f"**You have {total_ml:.0f} mL of calamansi juice. Here is what you can make:**")
+
+    recipes = [
+        {"name": "🍹 Calamansi Juice Drink",   "ml": 60,  "unit": "glass",   "desc": "Mix with water + sugar (1:3 ratio)"},
+        {"name": "🍵 Calamansi Tea",            "ml": 30,  "unit": "cup",     "desc": "Mix with hot water + honey"},
+        {"name": "🍗 Chicken Marinade",          "ml": 50,  "unit": "serving", "desc": "Enough for 250g chicken"},
+        {"name": "🥗 Salad Dressing",           "ml": 20,  "unit": "serving", "desc": "Mix with olive oil + salt"},
+        {"name": "💊 Vitamin C Drink",          "ml": 15,  "unit": "shot",    "desc": "Pure calamansi shot"},
+        {"name": "🫙 Calamansi Vinegar",        "ml": 200, "unit": "bottle",  "desc": "Fermented calamansi vinegar"},
+        {"name": "🧴 Calamansi Concentrate",    "ml": 100, "unit": "jar",     "desc": "Boil down with sugar for syrup"},
+        {"name": "🍰 Calamansi Cake/Pastry",    "ml": 45,  "unit": "recipe",  "desc": "For baking calamansi-flavored goods"},
+    ]
+
+    # Ripeness tips
+    if "Ripe" in ripeness_label:
+        tip = "🟠 Your fruits are **ripe** — perfect for juice drinks, tea, and desserts."
+    elif "Turning" in ripeness_label:
+        tip = "🟡 Your fruits are **partially ripe** — good for both drinks and cooking."
+    else:
+        tip = "🟢 Your fruits are **unripe** — more acidic, best for marinades, vinegar, and cooking."
+    st.info(tip)
+
+    # Recipe cards
+    cols = st.columns(2)
+    for i, r in enumerate(recipes):
+        qty     = int(total_ml // r["ml"])
+        leftover= total_ml % r["ml"]
+        enough  = qty >= 1
+        with cols[i % 2]:
+            status = f'<span class="recipe-ok">✅ You can make {qty}</span>' if enough else f'<span class="recipe-no">❌ Need {r["ml"] - total_ml:.0f} mL more</span>'
+            st.markdown(f"""
+            <div class="recipe-box">
+                <b>{r["name"]}</b><br>
+                <small style="color:#6b7280;">{r["desc"]}</small><br>
+                <small>Needs <b>{r["ml"]} mL</b> per {r["unit"]}</small><br>
+                {status}
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Summary
+    st.markdown("---")
+    st.markdown("**💡 Quick Summary:**")
+    makeable = [r for r in recipes if total_ml >= r["ml"]]
+    not_enough = [r for r in recipes if total_ml < r["ml"]]
+    if makeable:
+        st.success(f"With {total_ml:.0f} mL you can make: " + ", ".join([r['name'] for r in makeable]))
+    if not_enough:
+        st.warning(f"Not enough juice for: " + ", ".join([r['name'] for r in not_enough]))
+
+
+def show_results(all_features, predictions, show_recommendations=False):
     fruit_count = len(predictions)
     total_juice = sum(predictions)
     avg_juice   = total_juice / fruit_count if fruit_count > 0 else 0
     label, color, desc = get_ripeness(all_features)
 
-    # Detection banner
     st.markdown(f"""
     <div class="detect-box">
         <span style="font-size:22px;font-weight:bold;color:#166534;">🍋 Calamansi Detected</span>
@@ -140,13 +363,11 @@ def show_results(all_features, predictions):
     </div>
     """, unsafe_allow_html=True)
 
-    # Metrics
     c1, c2, c3 = st.columns(3)
     c1.metric("🍊 Fruits Detected",    f"{fruit_count}")
     c2.metric("📊 Avg Juice per Fruit", f"{avg_juice:.2f} mL")
     c3.metric("💧 Total Juice Yield",   f"{total_juice:.2f} mL")
 
-    # Big result box
     st.markdown(f"""
     <div class="total-box">
         <span style="font-size:16px;color:#bbf7d0;">🍋 {fruit_count} Calamansi Fruits Detected</span><br>
@@ -156,8 +377,6 @@ def show_results(all_features, predictions):
     """, unsafe_allow_html=True)
 
     st.divider()
-
-    # Per fruit table
     st.markdown('<div class="section-header">🍋 Per Fruit Breakdown</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame({
         "Fruit":               [f"#{i+1}" for i in range(fruit_count)],
@@ -169,21 +388,50 @@ def show_results(all_features, predictions):
                                 else "🟢 Green" for i in range(fruit_count)],
     }), width='stretch', hide_index=True)
 
-    # Chart
     st.divider()
-    st.markdown('<div class="section-header">📈 Juice Yield per Fruit</div>', unsafe_allow_html=True)
     fig, ax = plt.subplots(figsize=(max(6, fruit_count*0.7), 4))
-    bars = ax.bar([f"#{i+1}" for i in range(fruit_count)], predictions,
-                  color='#16a34a', edgecolor='white')
-    ax.axhline(avg_juice, color='red', linestyle='--', lw=1.5,
-               label=f'Avg = {avg_juice:.2f} mL')
+    bars = ax.bar([f"#{i+1}" for i in range(fruit_count)], predictions, color='#16a34a', edgecolor='white')
+    ax.axhline(avg_juice, color='red', linestyle='--', lw=1.5, label=f'Avg = {avg_juice:.2f} mL')
     ax.set_xlabel('Fruit'); ax.set_ylabel('Predicted Juice (mL)')
     ax.set_title(f'{fruit_count} fruits | Total: {total_juice:.2f} mL')
     ax.legend()
     for bar, val in zip(bars, predictions):
-        ax.text(bar.get_x()+bar.get_width()/2, val+0.05,
-                f'{val:.2f}', ha='center', fontsize=9)
+        ax.text(bar.get_x()+bar.get_width()/2, val+0.05, f'{val:.2f}', ha='center', fontsize=9)
     plt.tight_layout(); st.pyplot(fig)
+
+    # Recommendations only for logged-in users
+    if show_recommendations:
+        st.divider()
+        show_juice_recommendations(total_juice, label)
+    else:
+        st.divider()
+
+
+
+# ══════════════════════════════════════════════════════
+# LIVE CAMERA PROCESSOR
+# ══════════════════════════════════════════════════════
+class CalamansiDetector(VideoProcessorBase):
+    def __init__(self):
+        self.result_features  = []
+        self.result_annotated = None
+        self.lock = threading.Lock()
+
+    def recv(self, frame):
+        img     = frame.to_ndarray(format="bgr24")
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        all_features, valid_cnts, annotated = detect_on_frame(img_rgb)
+
+        with self.lock:
+            self.result_features  = all_features
+            self.result_annotated = annotated
+
+        out_bgr = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
+        out_bgr = cv2.resize(out_bgr, (img.shape[1], img.shape[0]))
+        count   = len(all_features)
+        cv2.putText(out_bgr, f"Detected: {count}", (10,35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 3)
+        cv2.putText(out_bgr, f"Detected: {count}", (10,35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (22,163,74), 2)
+        return av.VideoFrame.from_ndarray(out_bgr, format="bgr24")
 
 
 # ══════════════════════════════════════════════════════
@@ -199,16 +447,16 @@ if page == "🏠 Home":
         st.markdown('<div class="section-header">📌 About This System</div>', unsafe_allow_html=True)
         st.write("""
         This system predicts the **juice yield (mL)** of Calamansi fruits *(Citrus microcarpa)*
-        using video processing and linear regression. Spread the calamansi flat in a basket,
-        record a short top-down video, and the system automatically picks the best frame,
-        detects each individual fruit with a numbered box, and predicts the juice yield per fruit.
+        using live camera detection and linear regression. Spread calamansi flat in a basket,
+        point the camera above, and the system detects each individual fruit in real-time and
+        predicts the juice yield — then tells you what you can make with it.
         """)
         st.markdown('<div class="section-header">🎯 Objectives</div>', unsafe_allow_html=True)
         st.write("**1.** Collect and process calamansi fruit images for model training.")
         st.write("**2.** Extract image-based features such as size, shape, and color.")
         st.write("**3.** Train a Linear Regression model to predict juice yield per fruit.")
-        st.write("**4.** Implement video-based calamansi detection using color, shape, and size filtering.")
-        st.write("**5.** Deploy as a web-based system outputting detected count and total juice yield.")
+        st.write("**4.** Implement real-time calamansi detection using color, shape, and size filtering.")
+        st.write("**5.** Deploy as a web-based system outputting detected count, total juice yield, and usage recommendations.")
 
     with col2:
         st.markdown('<div class="section-header">📐 System Scope</div>', unsafe_allow_html=True)
@@ -216,43 +464,40 @@ if page == "🏠 Home":
         | Item | Detail |
         |------|--------|
         | Fruit | Calamansi *(Citrus microcarpa)* |
-        | Input | Video (MP4, MOV, AVI) |
-        | Setup | Spread flat in basket/container |
-        | Output | Count + juice per fruit + total |
+        | Input | Live Camera |
+        | Setup | Spread flat in basket |
+        | Output | Count + juice + recommendations |
         | Model | Linear Regression |
         | Features | Shape + Color |
+        """)
+        st.markdown('<div class="section-header">🔑 Access Levels</div>', unsafe_allow_html=True)
+        st.markdown("""
+        | Role | Access |
+        |------|--------|
+        | 👥 User | Home + Predict + **Recommendations** |
+        | 🔧 Admin | All pages |
         """)
 
     st.divider()
     st.markdown('<div class="section-header">🍋 What is Calamansi?</div>', unsafe_allow_html=True)
     st.markdown("""
-        Calamansi is a small citrus fruit native to the Philippines, commonly used for juice.
+    Calamansi *(Citrus microcarpa)* is a small citrus fruit native to the Philippines, widely used for juice, cooking, and beverages.
 
-        **Detection filters (calamansi-specific):**
-        - **Color:** Green (HSV) or yellow-orange when ripe
-        - **Shape:** Circularity ≥ 0.25 (round)
-        - **Size:** Diameter 1.5–5.5 cm
-
-        | Stage | Color | Description |
-        |-------|-------|-------------|
-        | 🟢 Green | Dark green | Unripe |
-        | 🟡 Turning | Yellow-green | Partially ripe |
-        | 🟠 Ripe | Yellow-orange | Fully ripe |
-        """)
+    | Stage | Color | Best Use |
+    |-------|-------|---------|
+    | 🟢 Green | Dark green | Marinades, vinegar, cooking |
+    | 🟡 Turning | Yellow-green | Mixed use — drinks and cooking |
+    | 🟠 Ripe | Yellow-orange | Juice drinks, tea, desserts |
+    """)
 
     st.divider()
     st.markdown('<div class="section-header">⚙️ How the System Works</div>', unsafe_allow_html=True)
     c1,c2,c3,c4,c5 = st.columns(5)
-    with c1:
-        st.markdown('<div class="step-box">🧺 <b>Step 1</b><br>Spread calamansi flat in a basket so each fruit is visible</div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="step-box">📹 <b>Step 2</b><br>Record a short top-down video while spreading the fruits</div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="step-box">🔬 <b>Step 3</b><br>System picks best frame — detects each fruit with a numbered box</div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown('<div class="step-box">📐 <b>Step 4</b><br>Extracts size, shape, color features per fruit</div>', unsafe_allow_html=True)
-    with c5:
-        st.markdown('<div class="step-box">💧 <b>Step 5</b><br>Linear Regression predicts juice per fruit → total yield</div>', unsafe_allow_html=True)
+    with c1: st.markdown('<div class="step-box">🧺 <b>Step 1</b><br>Spread calamansi flat in a basket</div>', unsafe_allow_html=True)
+    with c2: st.markdown('<div class="step-box">📷 <b>Step 2</b><br>Open live camera — point directly above</div>', unsafe_allow_html=True)
+    with c3: st.markdown('<div class="step-box">🔬 <b>Step 3</b><br>System detects each fruit in real-time</div>', unsafe_allow_html=True)
+    with c4: st.markdown('<div class="step-box">💧 <b>Step 4</b><br>Click Predict — get juice yield per fruit</div>', unsafe_allow_html=True)
+    with c5: st.markdown('<div class="step-box">🍹 <b>Step 5</b><br>See what you can make with your juice</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════
@@ -260,7 +505,7 @@ if page == "🏠 Home":
 # ══════════════════════════════════════════════════════
 elif page == "🔍 Predict Juice Yield":
     st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Spread calamansi flat in a basket and record a top-down video</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Spread calamansi flat in a basket — point camera from above</div>', unsafe_allow_html=True)
     st.divider()
 
     if not model_loaded:
@@ -268,98 +513,45 @@ elif page == "🔍 Predict Juice Yield":
         st.stop()
 
     st.markdown("""
-    **How to record:**
-    1. Spread calamansi in a basket — each fruit should be visible from above
-    2. Hold camera **directly above** looking straight down
-    3. Record **3–10 seconds** while spreading and adjusting fruits
-    4. Upload below — system picks the frame where most fruits are visible
+    **How to use:**
+    1. Spread calamansi in a basket so each fruit is visible
+    2. Click **Start** to open the live camera
+    3. Hold camera directly above the basket
+    4. Green boxes will appear on each detected fruit in real-time
+    5. When all fruits are clearly visible — click **📸 Predict Now**
     """)
 
-    uploaded_video = st.file_uploader("📹 Upload video (MP4, MOV, AVI)", type=['mp4','mov','avi','m4v'])
+    ctx = webrtc_streamer(
+        key="calamansi-live",
+        video_processor_factory=CalamansiDetector,
+        rtc_configuration=RTC_CONFIG,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
 
-    if uploaded_video:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-            tmp.write(uploaded_video.read())
-            tmp_path = tmp.name
+    st.divider()
 
-        cap          = cv2.VideoCapture(tmp_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps          = cap.get(cv2.CAP_PROP_FPS) or 30
+    if ctx.video_processor:
+        if st.button("📸 Predict Now — Capture Current Frame", type="primary"):
+            with ctx.video_processor.lock:
+                features  = list(ctx.video_processor.result_features)
+                annotated = ctx.video_processor.result_annotated
 
-        if total_frames == 0:
-            st.error("❌ Could not read video. Try MP4 format.")
-            os.unlink(tmp_path)
-            st.stop()
-
-        frame_indices = list(range(0, total_frames, max(1, int(fps))))[:20]
-        st.info(f"📹 {total_frames} frames at {fps:.0f} fps — processing {len(frame_indices)} frames")
-
-        # Real-time frame display
-        st.markdown('<div class="section-header">🎬 Live Detection</div>', unsafe_allow_html=True)
-        frame_display = st.empty()
-        status_text   = st.empty()
-
-        best_frame_rgb = None
-        best_count     = 0
-        best_features  = []
-        best_annotated = None
-
-        for idx, fn in enumerate(frame_indices):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, fn)
-            ret, frame = cap.read()
-            if not ret:
-                continue
-
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Run detection on this frame
-            all_features, valid_cnts, annotated = detect_on_frame(img_rgb)
-
-            # Show annotated frame in real-time
-            frame_display.image(annotated, caption=f"Frame {idx+1}/{len(frame_indices)} — {len(all_features)} fruits detected", width='stretch')
-            status_text.markdown(f"🔬 Scanning... **{len(all_features)} calamansi** detected in this frame")
-
-            # Track best frame
-            if len(all_features) > best_count:
-                best_count     = len(all_features)
-                best_frame_rgb = img_rgb
-                best_features  = all_features
-                best_annotated = annotated
-
-        cap.release(); os.unlink(tmp_path)
-
-        if not best_features:
-            frame_display.empty(); status_text.empty()
-            st.error("❌ No calamansi detected. Make sure fruits are spread flat and well-lit.")
-            st.stop()
-
-        status_text.empty()
-        frame_display.empty()
-
-        st.success(f"✅ Done! Best frame has {best_count} fruits detected")
-
-        # Show best frame side by side
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown('<div class="section-header">📹 Best Frame (Original)</div>', unsafe_allow_html=True)
-            st.image(preprocess_array(best_frame_rgb), width='stretch')
-        with c2:
-            st.markdown(f'<div class="section-header">🔬 Detected ({best_count} fruits)</div>', unsafe_allow_html=True)
-            st.image(best_annotated, width='stretch')
-
-        st.markdown("""
-        <small style="color:#6b7280;">
-        🟢 Green boxes = detected calamansi with individual numbers
-        </small>
-        """, unsafe_allow_html=True)
-
-        st.divider()
-        predictions = predict_from_features(best_features)
-        show_results(best_features, predictions)
+            if not features:
+                st.error("❌ No calamansi detected. Make sure fruits are spread flat and well-lit.")
+            else:
+                predictions = predict_from_features(features)
+                st.success(f"✅ {len(features)} calamansi detected!")
+                if annotated is not None:
+                    st.image(annotated, caption=f"Captured — {len(features)} fruits detected", width='stretch')
+                # Show recommendations only for logged-in users (not guest)
+                show_results(features, predictions, show_recommendations=True)
+    else:
+        st.info("👆 Click **Start** above to open the camera.")
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 3: MODEL PERFORMANCE
+# PAGE 3: MODEL PERFORMANCE (admin only)
 # ══════════════════════════════════════════════════════
 elif page == "📊 Model Performance":
     st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
@@ -367,11 +559,9 @@ elif page == "📊 Model Performance":
     st.divider()
 
     if not model_loaded:
-        st.error("❌ Model not found. Please run **train_model.py** first.")
-        st.stop()
+        st.error("❌ Model not found."); st.stop()
     if not os.path.exists('calamansi_dataset.csv'):
-        st.error("❌ Dataset not found. Please run **train_model.py** first.")
-        st.stop()
+        st.error("❌ Dataset not found."); st.stop()
 
     df     = pd.read_csv('calamansi_dataset.csv')
     X      = df[FEATURE_COLS]; y = df['juice_ml']
@@ -381,7 +571,6 @@ elif page == "📊 Model Performance":
     rmse   = np.sqrt(mean_squared_error(y, y_pred))
     r2     = r2_score(y, y_pred)
 
-    st.markdown('<div class="section-header">📐 Evaluation Metrics</div>', unsafe_allow_html=True)
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Total Samples", f"{len(df)}")
     c2.metric("R² Score",      f"{r2:.4f}")
@@ -397,8 +586,6 @@ elif page == "📊 Model Performance":
         ax1.plot([mn,mx],[mn,mx],'r--',lw=2,label='Perfect Prediction')
         ax1.set_xlabel('Actual (mL)'); ax1.set_ylabel('Predicted (mL)')
         ax1.set_title('Actual vs Predicted'); ax1.legend()
-        ax1.text(0.05,0.92,f'R²={r2:.4f}',transform=ax1.transAxes,fontsize=10,
-                 color='darkred',bbox=dict(boxstyle='round',facecolor='lightyellow',alpha=0.8))
         plt.tight_layout(); st.pyplot(fig1)
     with col2:
         fig2, ax2 = plt.subplots(figsize=(6,5))
@@ -424,10 +611,7 @@ elif page == "📊 Model Performance":
         fig4, ax4 = plt.subplots(figsize=(7,6))
         ax4.barh(coef_df['Feature'],coef_df['Coefficient'],color=colors,edgecolor='white')
         ax4.axvline(0,color='black',linewidth=0.8)
-        ax4.set_xlabel('Coefficient Value'); ax4.set_title('Feature Coefficients')
-        for bar,val in zip(ax4.patches,coef_df['Coefficient']):
-            ax4.text(val+(0.005 if val>=0 else -0.005),bar.get_y()+bar.get_height()/2,
-                     f'{val:.3f}',va='center',ha='left' if val>=0 else 'right',fontsize=9)
+        ax4.set_title('Feature Coefficients')
         plt.tight_layout(); st.pyplot(fig4)
 
     st.divider()
@@ -437,16 +621,14 @@ elif page == "📊 Model Performance":
         cv_mae = -cross_val_score(model, X_sc, y, cv=kf, scoring='neg_mean_absolute_error')
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Mean R² (CV)",  f"{cv_r2.mean():.4f}",     f"± {cv_r2.std():.4f}")
+        st.metric("Mean R² (CV)",  f"{cv_r2.mean():.4f}", f"± {cv_r2.std():.4f}")
         st.metric("Mean MAE (CV)", f"{cv_mae.mean():.4f} mL", f"± {cv_mae.std():.4f}")
     with col2:
         fig5, ax5 = plt.subplots(figsize=(6,4))
         ax5.bar([f'Fold {i+1}' for i in range(5)],cv_r2,color='steelblue',edgecolor='white')
         ax5.axhline(cv_r2.mean(),color='red',linestyle='--',lw=2,label=f'Mean={cv_r2.mean():.4f}')
-        ax5.set_ylim(0,1.05); ax5.set_ylabel('R² Score')
-        ax5.set_title('5-Fold Cross Validation'); ax5.legend()
-        for i,v in enumerate(cv_r2):
-            ax5.text(i,v+0.01,f'{v:.3f}',ha='center',fontsize=10)
+        ax5.set_ylim(0,1.05); ax5.legend()
+        ax5.set_title('5-Fold Cross Validation')
         plt.tight_layout(); st.pyplot(fig5)
 
     st.divider()
