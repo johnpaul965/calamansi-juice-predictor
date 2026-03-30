@@ -7,6 +7,8 @@ import cv2
 import sqlite3
 import hashlib
 import threading
+import base64
+import io
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
@@ -59,15 +61,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # ══════════════════════════════════════════════════════
-# USER DATABASE (JSON file)
+# DATABASE  (users + predictions — same file)
 # ══════════════════════════════════════════════════════
 DB_FILE = "users.db"
 
+
 def init_db():
-    """Initialize SQLite database and create users table if not exists."""
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
+
+    # Users table
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
@@ -75,26 +80,42 @@ def init_db():
             role     TEXT NOT NULL DEFAULT 'user'
         )
     """)
-    # Create default admin account if not exists
+
+    # Predictions table  ← NEW
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS predictions (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            username       TEXT    NOT NULL,
+            created_at     TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+            fruit_count    INTEGER NOT NULL DEFAULT 0,
+            total_juice_ml REAL    NOT NULL DEFAULT 0.0,
+            snapshot_b64   TEXT,
+            notes          TEXT
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pred_user ON predictions (username)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions (created_at DESC)")
+
+    # Default admin
     admin_pass = hashlib.sha256("admin2024".encode()).hexdigest()
     c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
               ("admin", admin_pass, "admin"))
     conn.commit()
     conn.close()
 
+
+# ── User helpers ──────────────────────────────────────
+
 def get_user(username):
-    """Get user record by username. Returns dict or None."""
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
     c.execute("SELECT username, password, role FROM users WHERE username = ?", (username,))
     row  = c.fetchone()
     conn.close()
-    if row:
-        return {"username": row[0], "password": row[1], "role": row[2]}
-    return None
+    return {"username": row[0], "password": row[1], "role": row[2]} if row else None
+
 
 def create_user(username, password, role="user"):
-    """Create new user. Returns True if success, False if username exists."""
     try:
         conn = sqlite3.connect(DB_FILE)
         c    = conn.cursor()
@@ -106,15 +127,100 @@ def create_user(username, password, role="user"):
     except sqlite3.IntegrityError:
         return False
 
+
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
-# Initialize database on startup
+
+# ── Prediction helpers  ────────────────────────────────
+
+def save_prediction(username, fruit_count, total_juice_ml, snapshot_b64=None):
+    """Save one prediction session to the database."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("""
+        INSERT INTO predictions (username, fruit_count, total_juice_ml, snapshot_b64)
+        VALUES (?, ?, ?, ?)
+    """, (username, fruit_count, round(total_juice_ml, 2), snapshot_b64))
+    conn.commit()
+    row_id = c.lastrowid
+    conn.close()
+    return row_id
+
+
+def get_predictions(username, is_admin=False, limit=200):
+    """Fetch history rows. Admin gets all users."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    if is_admin:
+        c.execute("""
+            SELECT id, username, created_at, fruit_count, total_juice_ml
+            FROM predictions ORDER BY created_at DESC LIMIT ?
+        """, (limit,))
+    else:
+        c.execute("""
+            SELECT id, username, created_at, fruit_count, total_juice_ml
+            FROM predictions WHERE username = ?
+            ORDER BY created_at DESC LIMIT ?
+        """, (username, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_snapshot(pred_id):
+    """Return the base-64 snapshot PNG for one prediction."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT snapshot_b64 FROM predictions WHERE id = ?", (pred_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def delete_prediction(pred_id, username, is_admin=False):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    if is_admin:
+        c.execute("DELETE FROM predictions WHERE id = ?", (pred_id,))
+    else:
+        c.execute("DELETE FROM predictions WHERE id = ? AND username = ?", (pred_id, username))
+    conn.commit()
+    deleted = c.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def user_stats(username):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("""
+        SELECT COUNT(*), COALESCE(SUM(fruit_count),0), COALESCE(SUM(total_juice_ml),0)
+        FROM predictions WHERE username = ?
+    """, (username,))
+    row = c.fetchone()
+    conn.close()
+    return {"sessions": row[0], "fruits": int(row[1]), "juice_ml": row[2]}
+
+
+def frame_to_b64(rgb_array, max_side=640):
+    """Encode annotated RGB frame as base-64 PNG string."""
+    img = Image.fromarray(rgb_array.astype("uint8"))
+    w, h = img.size
+    if max(w, h) > max_side:
+        scale = max_side / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+# Initialise DB on every startup (safe — uses IF NOT EXISTS)
 init_db()
 
 
 # ══════════════════════════════════════════════════════
-# AUTH PAGES
+# AUTH
 # ══════════════════════════════════════════════════════
 def show_auth():
     st.markdown('<div class="main-title">🍋 Calamansi Juice Yield Prediction System</div>', unsafe_allow_html=True)
@@ -123,8 +229,6 @@ def show_auth():
 
     col1, col2, col3 = st.columns([1, 1.4, 1])
     with col2:
-
-        # Toggle between User and Admin login
         if "auth_mode" not in st.session_state:
             st.session_state.auth_mode = "user"
 
@@ -132,17 +236,14 @@ def show_auth():
         with c1:
             if st.button("👥 User Login", use_container_width=True,
                          type="primary" if st.session_state.auth_mode == "user" else "secondary"):
-                st.session_state.auth_mode = "user"
-                st.rerun()
+                st.session_state.auth_mode = "user"; st.rerun()
         with c2:
             if st.button("🔧 Admin Login", use_container_width=True,
                          type="primary" if st.session_state.auth_mode == "admin" else "secondary"):
-                st.session_state.auth_mode = "admin"
-                st.rerun()
+                st.session_state.auth_mode = "admin"; st.rerun()
 
         st.markdown("---")
 
-        # ── USER LOGIN / REGISTER ──
         if st.session_state.auth_mode == "user":
             tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
 
@@ -177,13 +278,10 @@ def show_auth():
                     elif get_user(new_user):
                         st.error("❌ Username already exists.")
                     else:
-                        success = create_user(new_user, hash_pw(new_pass), role="user")
-                        if success:
+                        if create_user(new_user, hash_pw(new_pass), role="user"):
                             st.success(f"✅ Account created! You can now login as **{new_user}**.")
                         else:
                             st.error("❌ Username already exists.")
-
-        # ── ADMIN LOGIN ──
         else:
             st.markdown("#### Admin Login")
             st.info("🔧 This login is for system administrators only.")
@@ -200,14 +298,13 @@ def show_auth():
                     st.error("❌ Invalid admin credentials.")
 
 
-
-# Check login state
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
 if not st.session_state.logged_in:
     show_auth()
     st.stop()
+
 
 # ══════════════════════════════════════════════════════
 # MAIN APP
@@ -222,21 +319,18 @@ if model_loaded:
 
 role     = st.session_state.get("role", "guest")
 username = st.session_state.get("username", "Guest")
+is_admin = role == "admin"
 
-# Sidebar
 with st.sidebar:
     st.markdown("## Navigation")
-    if role == "admin":
-        pages = ["🏠 Home", "🔍 Predict Juice Yield", "📊 Model Performance"]
+    if is_admin:
+        pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History", "📊 Model Performance"]
     else:
-        pages = ["🏠 Home", "🔍 Predict Juice Yield"]
+        pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History"]
     page = st.radio("Go to", pages)
     st.markdown("---")
-    if role == "guest":
-        st.markdown("👤 **Guest**")
-    else:
-        st.markdown(f"👤 **{username}**")
-        st.markdown(f"🔑 Role: `{role}`")
+    st.markdown(f"👤 **{username}**")
+    st.markdown(f"🔑 Role: `{role}`")
     st.markdown(f"**Model:** {'✅ Loaded' if model_loaded else '❌ Not found'}")
     st.markdown("---")
     if st.button("🚪 Logout"):
@@ -276,27 +370,26 @@ def get_ripeness(all_features):
 
 
 def detect_on_frame(img_rgb):
-    img_blur = preprocess_array(img_rgb)
-    mask, hsv = segment_fruit(img_blur)
-    circles   = count_hough(img_blur, mask)
-    ppc       = calibrate_ppc(circles) if circles else 41.0
+    img_blur          = preprocess_array(img_rgb)
+    mask, hsv         = segment_fruit(img_blur)
+    circles           = count_hough(img_blur, mask)
+    ppc               = calibrate_ppc(circles) if circles else 41.0
     all_features, valid_cnts = get_features_from_hough(img_blur, circles, ppc)
     if not all_features:
         all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
     annotated = img_blur.copy()
     for i, cnt in enumerate(valid_cnts):
-        x,y,w,h = cv2.boundingRect(cnt)
-        p=6; x=max(0,x-p); y=max(0,y-p)
-        w=min(img_blur.shape[1]-x,w+2*p); h=min(img_blur.shape[0]-y,h+2*p)
-        cv2.rectangle(annotated,(x,y),(x+w,y+h),(22,163,74),2)
-        cv2.putText(annotated,f"#{i+1}",(x+4,y+20),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.55,(22,163,74),2)
+        x, y, w, h = cv2.boundingRect(cnt)
+        p = 6; x = max(0, x-p); y = max(0, y-p)
+        w = min(img_blur.shape[1]-x, w+2*p); h = min(img_blur.shape[0]-y, h+2*p)
+        cv2.rectangle(annotated, (x, y), (x+w, y+h), (22, 163, 74), 2)
+        cv2.putText(annotated, f"#{i+1}", (x+4, y+20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (22, 163, 74), 2)
     return all_features, valid_cnts, annotated
 
 
 def show_juice_recommendations(total_ml, ripeness_label):
-    """Show what the user can make with their calamansi juice."""
     st.markdown('<div class="section-header">🍹 Juice Usage Recommendations</div>', unsafe_allow_html=True)
     st.markdown(f"**You have {total_ml:.0f} mL of calamansi juice. Here is what you can make:**")
 
@@ -311,7 +404,6 @@ def show_juice_recommendations(total_ml, ripeness_label):
         {"name": "🍰 Calamansi Cake/Pastry",    "ml": 45,  "unit": "recipe",  "desc": "For baking calamansi-flavored goods"},
     ]
 
-    # Ripeness tips
     if "Ripe" in ripeness_label:
         tip = "🟠 Your fruits are **ripe** — perfect for juice drinks, tea, and desserts."
     elif "Turning" in ripeness_label:
@@ -320,14 +412,14 @@ def show_juice_recommendations(total_ml, ripeness_label):
         tip = "🟢 Your fruits are **unripe** — more acidic, best for marinades, vinegar, and cooking."
     st.info(tip)
 
-    # Recipe cards
     cols = st.columns(2)
     for i, r in enumerate(recipes):
         qty     = int(total_ml // r["ml"])
-        leftover= total_ml % r["ml"]
         enough  = qty >= 1
         with cols[i % 2]:
-            status = f'<span class="recipe-ok">✅ You can make {qty}</span>' if enough else f'<span class="recipe-no">❌ Need {r["ml"] - total_ml:.0f} mL more</span>'
+            status = (f'<span class="recipe-ok">✅ You can make {qty}</span>'
+                      if enough else
+                      f'<span class="recipe-no">❌ Need {r["ml"] - total_ml:.0f} mL more</span>')
             st.markdown(f"""
             <div class="recipe-box">
                 <b>{r["name"]}</b><br>
@@ -337,15 +429,14 @@ def show_juice_recommendations(total_ml, ripeness_label):
             </div>
             """, unsafe_allow_html=True)
 
-    # Summary
     st.markdown("---")
     st.markdown("**💡 Quick Summary:**")
-    makeable = [r for r in recipes if total_ml >= r["ml"]]
+    makeable   = [r for r in recipes if total_ml >= r["ml"]]
     not_enough = [r for r in recipes if total_ml < r["ml"]]
     if makeable:
         st.success(f"With {total_ml:.0f} mL you can make: " + ", ".join([r['name'] for r in makeable]))
     if not_enough:
-        st.warning(f"Not enough juice for: " + ", ".join([r['name'] for r in not_enough]))
+        st.warning("Not enough juice for: " + ", ".join([r['name'] for r in not_enough]))
 
 
 def show_results(all_features, predictions, show_recommendations=False):
@@ -383,10 +474,10 @@ def show_results(all_features, predictions, show_recommendations=False):
         "Predicted Juice (mL)":[f"{p:.2f}" for p in predictions],
         "Diameter (cm)":       [f"{all_features[i]['diameter_cm']:.2f}" for i in range(fruit_count)],
         "Area (cm²)":          [f"{all_features[i]['area_cm2']:.2f}" for i in range(fruit_count)],
-        "Ripeness":            ["🟠 Ripe" if all_features[i]['mean_hue']<25
-                                else "🟡 Turning" if all_features[i]['mean_hue']<50
+        "Ripeness":            ["🟠 Ripe" if all_features[i]['mean_hue'] < 25
+                                else "🟡 Turning" if all_features[i]['mean_hue'] < 50
                                 else "🟢 Green" for i in range(fruit_count)],
-    }), width='stretch', hide_index=True)
+    }), use_container_width=True, hide_index=True)
 
     st.divider()
     fig, ax = plt.subplots(figsize=(max(6, fruit_count*0.7), 4))
@@ -399,13 +490,11 @@ def show_results(all_features, predictions, show_recommendations=False):
         ax.text(bar.get_x()+bar.get_width()/2, val+0.05, f'{val:.2f}', ha='center', fontsize=9)
     plt.tight_layout(); st.pyplot(fig)
 
-    # Recommendations only for logged-in users
     if show_recommendations:
         st.divider()
         show_juice_recommendations(total_juice, label)
     else:
         st.divider()
-
 
 
 # ══════════════════════════════════════════════════════
@@ -429,8 +518,8 @@ class CalamansiDetector(VideoProcessorBase):
         out_bgr = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
         out_bgr = cv2.resize(out_bgr, (img.shape[1], img.shape[0]))
         count   = len(all_features)
-        cv2.putText(out_bgr, f"Detected: {count}", (10,35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 3)
-        cv2.putText(out_bgr, f"Detected: {count}", (10,35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (22,163,74), 2)
+        cv2.putText(out_bgr, f"Detected: {count}", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 3)
+        cv2.putText(out_bgr, f"Detected: {count}", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (22,163,74), 2)
         return av.VideoFrame.from_ndarray(out_bgr, format="bgr24")
 
 
@@ -474,8 +563,8 @@ if page == "🏠 Home":
         st.markdown("""
         | Role | Access |
         |------|--------|
-        | 👥 User | Home + Predict + **Recommendations** |
-        | 🔧 Admin | All pages |
+        | 👥 User | Home + Predict + History + Recommendations |
+        | 🔧 Admin | All pages + All users' history |
         """)
 
     st.divider()
@@ -492,7 +581,7 @@ if page == "🏠 Home":
 
     st.divider()
     st.markdown('<div class="section-header">⚙️ How the System Works</div>', unsafe_allow_html=True)
-    c1,c2,c3,c4,c5 = st.columns(5)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.markdown('<div class="step-box">🧺 <b>Step 1</b><br>Spread calamansi flat in a basket</div>', unsafe_allow_html=True)
     with c2: st.markdown('<div class="step-box">📷 <b>Step 2</b><br>Open live camera — point directly above</div>', unsafe_allow_html=True)
     with c3: st.markdown('<div class="step-box">🔬 <b>Step 3</b><br>System detects each fruit in real-time</div>', unsafe_allow_html=True)
@@ -541,17 +630,135 @@ elif page == "🔍 Predict Juice Yield":
                 st.error("❌ No calamansi detected. Make sure fruits are spread flat and well-lit.")
             else:
                 predictions = predict_from_features(features)
-                st.success(f"✅ {len(features)} calamansi detected!")
+                total_juice = sum(predictions)
+
+                # ── Save to history ──────────────────────────────────
+                snapshot_b64 = frame_to_b64(annotated) if annotated is not None else None
+                pred_id = save_prediction(
+                    username       = username,
+                    fruit_count    = len(features),
+                    total_juice_ml = total_juice,
+                    snapshot_b64   = snapshot_b64,
+                )
+                st.success(f"✅ {len(features)} calamansi detected! Saved as record #{pred_id}.")
+                # ─────────────────────────────────────────────────────
+
                 if annotated is not None:
-                    st.image(annotated, caption=f"Captured — {len(features)} fruits detected", width='stretch')
-                # Show recommendations only for logged-in users (not guest)
+                    st.image(annotated, caption=f"Captured — {len(features)} fruits detected",
+                             use_container_width=True)
                 show_results(features, predictions, show_recommendations=True)
     else:
         st.info("👆 Click **Start** above to open the camera.")
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 3: MODEL PERFORMANCE (admin only)
+# PAGE 3: HISTORY  ← NEW
+# ══════════════════════════════════════════════════════
+elif page == "🕐 History":
+    st.markdown('<div class="main-title">🕐 Prediction History</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Past juice yield prediction sessions</div>', unsafe_allow_html=True)
+    st.divider()
+
+    rows = get_predictions(username, is_admin=is_admin)
+
+    if not rows:
+        st.info("No predictions yet. Run a session on the Predict page to see results here.")
+        st.stop()
+
+    # Build DataFrame
+    df = pd.DataFrame(rows, columns=["id", "user", "date", "fruits", "juice_ml"])
+    df["date"]     = pd.to_datetime(df["date"])
+    df["juice_ml"] = df["juice_ml"].round(1)
+
+    # ── Summary stats ──────────────────────────────────────────────────────────
+    if is_admin:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Sessions", len(df))
+        c2.metric("Unique Users",   df["user"].nunique())
+        c3.metric("Total Fruits",   int(df["fruits"].sum()))
+        c4.metric("Total Juice",    f"{df['juice_ml'].sum():.1f} mL")
+    else:
+        stats = user_stats(username)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("My Sessions",  stats["sessions"])
+        c2.metric("Total Fruits", stats["fruits"])
+        c3.metric("Total Juice",  f"{stats['juice_ml']:.1f} mL")
+
+    st.divider()
+
+    # ── Admin user filter ──────────────────────────────────────────────────────
+    if is_admin:
+        all_users = ["All"] + sorted(df["user"].unique().tolist())
+        sel_user  = st.selectbox("Filter by user", all_users)
+        if sel_user != "All":
+            df = df[df["user"] == sel_user]
+
+    # ── Table ──────────────────────────────────────────────────────────────────
+    display_cols   = ["user", "date", "fruits", "juice_ml"] if is_admin else ["date", "fruits", "juice_ml"]
+    col_labels     = {"user": "User", "date": "Date & Time", "fruits": "Fruits", "juice_ml": "Juice (mL)"}
+    st.dataframe(
+        df[display_cols].rename(columns=col_labels),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # ── Row detail ─────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown('<div class="section-header">🔍 View Session Detail</div>', unsafe_allow_html=True)
+
+    pred_labels = [
+        f"#{r['id']}  {r['date'].strftime('%Y-%m-%d %H:%M')}  —  "
+        f"{r['fruits']} fruits  {r['juice_ml']} mL"
+        + (f"  [{r['user']}]" if is_admin else "")
+        for _, r in df.iterrows()
+    ]
+    sel_idx = st.selectbox("Select a session", range(len(df)), format_func=lambda i: pred_labels[i])
+    sel_row = df.iloc[sel_idx]
+    sel_id  = int(sel_row["id"])
+
+    col_img, col_info = st.columns([2, 1])
+
+    with col_img:
+        b64 = get_snapshot(sel_id)
+        if b64:
+            st.image(f"data:image/png;base64,{b64}",
+                     caption=f"Session #{sel_id} — detected fruits",
+                     use_container_width=True)
+        else:
+            st.info("No snapshot stored for this session.")
+
+    with col_info:
+        st.markdown("**Session Details**")
+        if is_admin:
+            st.write(f"**User:** {sel_row['user']}")
+        st.write(f"**Date:** {sel_row['date'].strftime('%Y-%m-%d %H:%M:%S')}")
+        st.write(f"**Fruits detected:** {sel_row['fruits']}")
+        st.write(f"**Juice yield:** {sel_row['juice_ml']} mL")
+
+        st.divider()
+
+        can_delete = is_admin or sel_row["user"] == username
+        if can_delete:
+            if st.button("🗑️ Delete this record", type="secondary"):
+                if delete_prediction(sel_id, username, is_admin):
+                    st.success("Record deleted.")
+                    st.rerun()
+                else:
+                    st.error("Could not delete — permission denied.")
+
+    # ── Download CSV ───────────────────────────────────────────────────────────
+    st.divider()
+    csv = df[display_cols].rename(columns=col_labels).to_csv(index=False)
+    st.download_button(
+        "⬇️ Download CSV",
+        data=csv,
+        file_name=f"history_{username}.csv",
+        mime="text/csv",
+    )
+
+
+# ══════════════════════════════════════════════════════
+# PAGE 4: MODEL PERFORMANCE (admin only)
 # ══════════════════════════════════════════════════════
 elif page == "📊 Model Performance":
     st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
@@ -571,7 +778,7 @@ elif page == "📊 Model Performance":
     rmse   = np.sqrt(mean_squared_error(y, y_pred))
     r2     = r2_score(y, y_pred)
 
-    c1,c2,c3,c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Samples", f"{len(df)}")
     c2.metric("R² Score",      f"{r2:.4f}")
     c3.metric("MAE",           f"{mae:.4f} mL")
@@ -580,17 +787,17 @@ elif page == "📊 Model Performance":
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
-        fig1, ax1 = plt.subplots(figsize=(6,5))
+        fig1, ax1 = plt.subplots(figsize=(6, 5))
         ax1.scatter(y, y_pred, color='steelblue', alpha=0.7, edgecolors='white', s=60)
-        mn,mx = min(y.min(),y_pred.min())-0.5, max(y.max(),y_pred.max())+0.5
-        ax1.plot([mn,mx],[mn,mx],'r--',lw=2,label='Perfect Prediction')
+        mn, mx = min(y.min(), y_pred.min())-0.5, max(y.max(), y_pred.max())+0.5
+        ax1.plot([mn, mx], [mn, mx], 'r--', lw=2, label='Perfect Prediction')
         ax1.set_xlabel('Actual (mL)'); ax1.set_ylabel('Predicted (mL)')
         ax1.set_title('Actual vs Predicted'); ax1.legend()
         plt.tight_layout(); st.pyplot(fig1)
     with col2:
-        fig2, ax2 = plt.subplots(figsize=(6,5))
+        fig2, ax2 = plt.subplots(figsize=(6, 5))
         ax2.scatter(y_pred, y-y_pred, color='darkorange', alpha=0.7, edgecolors='white', s=60)
-        ax2.axhline(0,color='red',linestyle='--',lw=2)
+        ax2.axhline(0, color='red', linestyle='--', lw=2)
         ax2.set_xlabel('Predicted (mL)'); ax2.set_ylabel('Residuals (mL)')
         ax2.set_title('Residuals vs Fitted')
         plt.tight_layout(); st.pyplot(fig2)
@@ -598,19 +805,19 @@ elif page == "📊 Model Performance":
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
-        fig3, ax3 = plt.subplots(figsize=(7,6))
+        fig3, ax3 = plt.subplots(figsize=(7, 6))
         corr = df[FEATURE_COLS+['juice_ml']].corr()
-        sns.heatmap(corr,annot=True,fmt='.2f',cmap='coolwarm',
-                    mask=np.triu(np.ones_like(corr,dtype=bool)),
-                    square=True,linewidths=0.5,ax=ax3,cbar_kws={"shrink":0.8})
+        sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm',
+                    mask=np.triu(np.ones_like(corr, dtype=bool)),
+                    square=True, linewidths=0.5, ax=ax3, cbar_kws={"shrink": 0.8})
         ax3.set_title('Feature Correlation Heatmap')
         plt.tight_layout(); st.pyplot(fig3)
     with col2:
-        coef_df = pd.DataFrame({'Feature':FEATURE_COLS,'Coefficient':model.coef_}).sort_values('Coefficient',ascending=True)
-        colors  = ['#d73027' if c<0 else '#1a9850' for c in coef_df['Coefficient']]
-        fig4, ax4 = plt.subplots(figsize=(7,6))
-        ax4.barh(coef_df['Feature'],coef_df['Coefficient'],color=colors,edgecolor='white')
-        ax4.axvline(0,color='black',linewidth=0.8)
+        coef_df = pd.DataFrame({'Feature': FEATURE_COLS, 'Coefficient': model.coef_}).sort_values('Coefficient', ascending=True)
+        colors  = ['#d73027' if c < 0 else '#1a9850' for c in coef_df['Coefficient']]
+        fig4, ax4 = plt.subplots(figsize=(7, 6))
+        ax4.barh(coef_df['Feature'], coef_df['Coefficient'], color=colors, edgecolor='white')
+        ax4.axvline(0, color='black', linewidth=0.8)
         ax4.set_title('Feature Coefficients')
         plt.tight_layout(); st.pyplot(fig4)
 
@@ -621,18 +828,18 @@ elif page == "📊 Model Performance":
         cv_mae = -cross_val_score(model, X_sc, y, cv=kf, scoring='neg_mean_absolute_error')
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Mean R² (CV)",  f"{cv_r2.mean():.4f}", f"± {cv_r2.std():.4f}")
+        st.metric("Mean R² (CV)",  f"{cv_r2.mean():.4f}",  f"± {cv_r2.std():.4f}")
         st.metric("Mean MAE (CV)", f"{cv_mae.mean():.4f} mL", f"± {cv_mae.std():.4f}")
     with col2:
-        fig5, ax5 = plt.subplots(figsize=(6,4))
-        ax5.bar([f'Fold {i+1}' for i in range(5)],cv_r2,color='steelblue',edgecolor='white')
-        ax5.axhline(cv_r2.mean(),color='red',linestyle='--',lw=2,label=f'Mean={cv_r2.mean():.4f}')
-        ax5.set_ylim(0,1.05); ax5.legend()
+        fig5, ax5 = plt.subplots(figsize=(6, 4))
+        ax5.bar([f'Fold {i+1}' for i in range(5)], cv_r2, color='steelblue', edgecolor='white')
+        ax5.axhline(cv_r2.mean(), color='red', linestyle='--', lw=2, label=f'Mean={cv_r2.mean():.4f}')
+        ax5.set_ylim(0, 1.05); ax5.legend()
         ax5.set_title('5-Fold Cross Validation')
         plt.tight_layout(); st.pyplot(fig5)
 
     st.divider()
     eq = f"juice_ml = {model.intercept_:.4f}"
-    for feat,coef in zip(FEATURE_COLS,model.coef_):
+    for feat, coef in zip(FEATURE_COLS, model.coef_):
         eq += f" {'+'if coef>=0 else'-'} {abs(coef):.4f} × {feat}"
     st.code(eq, language=None)
