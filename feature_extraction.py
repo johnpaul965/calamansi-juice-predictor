@@ -215,24 +215,57 @@ def get_features_from_hough(img_blur, circles, ppc):
 
 
 def count_hough(img_blur, mask):
-    """Quick Hough circle count for calibration."""
+    """
+    Hough circle detection with false-positive prevention.
+    Returns empty list if:
+    - No significant green/yellow region in frame (< 3% coverage)
+    - Detected circles don't have enough saturation (not fruit-colored)
+    """
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+
+    # ── Guard 1: Check if enough fruit-colored pixels exist ──
+    # If mask covers less than 3% of image → no fruits present
+    total_px    = mask.shape[0] * mask.shape[1]
+    fruit_px    = np.sum(mask > 0)
+    coverage    = fruit_px / total_px
+    if coverage < 0.03:
+        return []
+
+    # ── Guard 2: Check average saturation of mask region ──
+    # Real calamansi has high saturation (S > 50)
+    # Plain green background/table has lower saturation
+    if fruit_px > 0:
+        avg_sat = np.mean(hsv[:,:,1][mask > 0])
+        if avg_sat < 40:
+            return []
+
     mean_v = float(gray.mean())
     bright_thresh = min(155, int(mean_v + 10))
-    hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
-    # Use fixed minDist=35 (prevents double counting touching fruits)
+
     circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2,
         minDist=35, param1=50, param2=22, minRadius=10, maxRadius=45)
     if circles is None:
         return []
+
     circles = np.round(circles[0,:]).astype("int")
     valid = []
-    for x,y,r in circles:
+    for x, y, r in circles:
         if not (0<=y<gray.shape[0] and 0<=x<gray.shape[1]): continue
         if gray[y,x] > bright_thresh: continue
-        h_val = int(hsv[y,x,0]); s_val = int(hsv[y,x,1])
-        if not (10<=h_val<=95 and s_val>20): continue
-        valid.append((x,y,r))
+        h_val = int(hsv[y,x,0])
+        s_val = int(hsv[y,x,1])
+        # Must be green or yellow-orange AND sufficiently saturated
+        if not (10<=h_val<=95 and s_val>40): continue
+        # Check that the circle region actually has fruit pixels
+        circle_mask = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.circle(circle_mask, (x,y), r, 255, -1)
+        overlap = np.sum(cv2.bitwise_and(mask, circle_mask) > 0)
+        circle_area = np.pi * r**2
+        if overlap / circle_area < 0.3:  # less than 30% overlap with fruit mask → skip
+            continue
+        valid.append((x, y, r))
+
     return valid
 
 
