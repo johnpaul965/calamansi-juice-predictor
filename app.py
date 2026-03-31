@@ -776,16 +776,6 @@ elif page == "🕐 History":
                 else:
                     st.error("Could not delete — permission denied.")
 
-    # ── Download CSV ───────────────────────────────────────────────────────────
-    st.divider()
-    csv = df[display_cols].rename(columns=col_labels).to_csv(index=False)
-    st.download_button(
-        "⬇️ Download CSV",
-        data=csv,
-        file_name=f"history_{username}.csv",
-        mime="text/csv",
-    )
-
 
 # ══════════════════════════════════════════════════════
 # PAGE 4: MANAGE USERS (ADMIN ONLY)
@@ -794,6 +784,10 @@ elif page == "👥 Manage Users":
     st.markdown('<div class="main-title">👥 User Management</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Admin can manage system users</div>', unsafe_allow_html=True)
     st.divider()
+
+    if not is_admin:
+        st.error("❌ Access denied. Admins only.")
+        st.stop()
 
     users = get_all_users()
 
@@ -807,9 +801,32 @@ elif page == "👥 Manage Users":
     st.dataframe(df_users, use_container_width=True, hide_index=True)
 
     st.divider()
-    st.markdown("### ⚙️ Manage User")
+    st.markdown("### ➕ Create New User")
 
-    # Filter out current admin from the selectable list for safety
+    with st.expander("Create a new user account", expanded=False):
+        nu_user  = st.text_input("Username",         key="nu_user",  placeholder="Enter username")
+        nu_pass  = st.text_input("Password",          type="password", key="nu_pass",  placeholder="Enter password")
+        nu_pass2 = st.text_input("Confirm Password",  type="password", key="nu_pass2", placeholder="Repeat password")
+        nu_role  = st.selectbox("Role", ["user", "admin"], key="nu_role")
+        if st.button("Create User", type="primary", key="btn_create_user"):
+            if not nu_user or not nu_pass:
+                st.error("❌ Username and password are required.")
+            elif nu_pass != nu_pass2:
+                st.error("❌ Passwords do not match.")
+            elif len(nu_pass) < 6:
+                st.error("❌ Password must be at least 6 characters.")
+            elif get_user(nu_user):
+                st.error("❌ Username already exists.")
+            else:
+                if create_user(nu_user, hash_pw(nu_pass), role=nu_role):
+                    st.success(f"✅ User **{nu_user}** created with role `{nu_role}`.")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to create user.")
+
+    st.divider()
+    st.markdown("### ⚙️ Manage Existing User")
+
     manageable_users = df_users["username"].tolist()
     selected_user = st.selectbox("Select User", manageable_users)
 
@@ -819,7 +836,6 @@ elif page == "👥 Manage Users":
     with col1:
         st.markdown("#### 🔑 Reset Password")
         new_pass = st.text_input("New Password", type="password", key="reset_pass")
-
         if st.button("Reset Password", type="primary"):
             if selected_user == "admin":
                 st.warning("⚠️ Cannot reset main admin password here.")
@@ -835,10 +851,11 @@ elif page == "👥 Manage Users":
     with col2:
         st.markdown("#### 🗑️ Delete User")
         st.warning(f"This will permanently delete **{selected_user}** and cannot be undone.")
-
         if st.button("Delete User", type="secondary"):
             if selected_user == "admin":
                 st.warning("⚠️ Cannot delete the main admin account.")
+            elif selected_user == username:
+                st.warning("⚠️ Cannot delete your own account while logged in.")
             else:
                 if delete_user(selected_user):
                     st.success(f"✅ User **{selected_user}** deleted.")
@@ -854,6 +871,10 @@ elif page == "📊 Model Performance":
     st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Evaluation metrics of the Linear Regression model</div>', unsafe_allow_html=True)
     st.divider()
+
+    if not is_admin:
+        st.error("❌ Access denied. Admins only.")
+        st.stop()
 
     if not model_loaded:
         st.error("❌ Model not found."); st.stop()
