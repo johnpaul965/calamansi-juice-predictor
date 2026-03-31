@@ -134,28 +134,28 @@ def hash_pw(pw):
 
 def get_all_users():
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    c    = conn.cursor()
     c.execute("SELECT username, role FROM users")
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-def delete_user(username):
+def delete_user(target_username):
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE username = ?", (username,))
+    c    = conn.cursor()
+    c.execute("DELETE FROM users WHERE username = ?", (target_username,))
     conn.commit()
     deleted = c.rowcount > 0
     conn.close()
     return deleted
 
 
-def reset_password(username, new_password):
+def reset_password(target_username, new_password):
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    c    = conn.cursor()
     c.execute("UPDATE users SET password = ? WHERE username = ?",
-              (hash_pw(new_password), username))
+              (hash_pw(new_password), target_username))
     conn.commit()
     updated = c.rowcount > 0
     conn.close()
@@ -594,7 +594,7 @@ if page == "🏠 Home":
         | Role | Access |
         |------|--------|
         | 👥 User | Home + Predict + History + Recommendations |
-        | 🔧 Admin | All pages + All users' history + Manage Users |
+        | 🔧 Admin | All pages + Manage Users + All users' history |
         """)
 
     st.divider()
@@ -776,6 +776,16 @@ elif page == "🕐 History":
                 else:
                     st.error("Could not delete — permission denied.")
 
+    # ── Download CSV ───────────────────────────────────────────────────────────
+    st.divider()
+    csv = df[display_cols].rename(columns=col_labels).to_csv(index=False)
+    st.download_button(
+        "⬇️ Download CSV",
+        data=csv,
+        file_name=f"history_{username}.csv",
+        mime="text/csv",
+    )
+
 
 # ══════════════════════════════════════════════════════
 # PAGE 4: MANAGE USERS (ADMIN ONLY)
@@ -791,15 +801,17 @@ elif page == "👥 Manage Users":
         st.info("No users found.")
         st.stop()
 
-    df = pd.DataFrame(users, columns=["username", "role"])
+    df_users = pd.DataFrame(users, columns=["username", "role"])
 
     st.markdown("### 📋 All Users")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df_users, use_container_width=True, hide_index=True)
 
     st.divider()
     st.markdown("### ⚙️ Manage User")
 
-    selected_user = st.selectbox("Select User", df["username"])
+    # Filter out current admin from the selectable list for safety
+    manageable_users = df_users["username"].tolist()
+    selected_user = st.selectbox("Select User", manageable_users)
 
     col1, col2 = st.columns(2)
 
@@ -815,27 +827,28 @@ elif page == "👥 Manage Users":
                 st.error("❌ Password must be at least 6 characters.")
             else:
                 if reset_password(selected_user, new_pass):
-                    st.success(f"✅ Password reset for {selected_user}")
+                    st.success(f"✅ Password reset for **{selected_user}**.")
                 else:
                     st.error("❌ Failed to reset password.")
 
     # 🗑️ DELETE USER
     with col2:
         st.markdown("#### 🗑️ Delete User")
+        st.warning(f"This will permanently delete **{selected_user}** and cannot be undone.")
 
         if st.button("Delete User", type="secondary"):
             if selected_user == "admin":
-                st.warning("⚠️ Cannot delete main admin account.")
+                st.warning("⚠️ Cannot delete the main admin account.")
             else:
                 if delete_user(selected_user):
-                    st.success(f"✅ User {selected_user} deleted.")
+                    st.success(f"✅ User **{selected_user}** deleted.")
                     st.rerun()
                 else:
                     st.error("❌ Failed to delete user.")
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 5: MODEL PERFORMANCE (admin only)
+# PAGE 5: MODEL PERFORMANCE (ADMIN ONLY)
 # ══════════════════════════════════════════════════════
 elif page == "📊 Model Performance":
     st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
