@@ -81,7 +81,7 @@ def init_db():
         )
     """)
 
-    # Predictions table  ← NEW
+    # Predictions table
     c.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +130,36 @@ def create_user(username, password, role="user"):
 
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
+
+
+def get_all_users():
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT username, role FROM users")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_user(target_username):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM users WHERE username = ?", (target_username,))
+    conn.commit()
+    deleted = c.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def reset_password(target_username, new_password):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE users SET password = ? WHERE username = ?",
+              (hash_pw(new_password), target_username))
+    conn.commit()
+    updated = c.rowcount > 0
+    conn.close()
+    return updated
 
 
 # ── Prediction helpers  ────────────────────────────────
@@ -324,7 +354,7 @@ is_admin = role == "admin"
 with st.sidebar:
     st.markdown("## Navigation")
     if is_admin:
-        pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History", "📊 Model Performance"]
+        pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History", "👥 Manage Users", "📊 Model Performance"]
     else:
         pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History"]
     page = st.radio("Go to", pages)
@@ -564,7 +594,7 @@ if page == "🏠 Home":
         | Role | Access |
         |------|--------|
         | 👥 User | Home + Predict + History + Recommendations |
-        | 🔧 Admin | All pages + All users' history |
+        | 🔧 Admin | All pages + Manage Users + All users' history |
         """)
 
     st.divider()
@@ -652,7 +682,7 @@ elif page == "🔍 Predict Juice Yield":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 3: HISTORY  ← NEW
+# PAGE 3: HISTORY
 # ══════════════════════════════════════════════════════
 elif page == "🕐 History":
     st.markdown('<div class="main-title">🕐 Prediction History</div>', unsafe_allow_html=True)
@@ -758,7 +788,67 @@ elif page == "🕐 History":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 4: MODEL PERFORMANCE (admin only)
+# PAGE 4: MANAGE USERS (ADMIN ONLY)
+# ══════════════════════════════════════════════════════
+elif page == "👥 Manage Users":
+    st.markdown('<div class="main-title">👥 User Management</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Admin can manage system users</div>', unsafe_allow_html=True)
+    st.divider()
+
+    users = get_all_users()
+
+    if not users:
+        st.info("No users found.")
+        st.stop()
+
+    df_users = pd.DataFrame(users, columns=["username", "role"])
+
+    st.markdown("### 📋 All Users")
+    st.dataframe(df_users, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### ⚙️ Manage User")
+
+    # Filter out current admin from the selectable list for safety
+    manageable_users = df_users["username"].tolist()
+    selected_user = st.selectbox("Select User", manageable_users)
+
+    col1, col2 = st.columns(2)
+
+    # 🔑 RESET PASSWORD
+    with col1:
+        st.markdown("#### 🔑 Reset Password")
+        new_pass = st.text_input("New Password", type="password", key="reset_pass")
+
+        if st.button("Reset Password", type="primary"):
+            if selected_user == "admin":
+                st.warning("⚠️ Cannot reset main admin password here.")
+            elif len(new_pass) < 6:
+                st.error("❌ Password must be at least 6 characters.")
+            else:
+                if reset_password(selected_user, new_pass):
+                    st.success(f"✅ Password reset for **{selected_user}**.")
+                else:
+                    st.error("❌ Failed to reset password.")
+
+    # 🗑️ DELETE USER
+    with col2:
+        st.markdown("#### 🗑️ Delete User")
+        st.warning(f"This will permanently delete **{selected_user}** and cannot be undone.")
+
+        if st.button("Delete User", type="secondary"):
+            if selected_user == "admin":
+                st.warning("⚠️ Cannot delete the main admin account.")
+            else:
+                if delete_user(selected_user):
+                    st.success(f"✅ User **{selected_user}** deleted.")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to delete user.")
+
+
+# ══════════════════════════════════════════════════════
+# PAGE 5: MODEL PERFORMANCE (ADMIN ONLY)
 # ══════════════════════════════════════════════════════
 elif page == "📊 Model Performance":
     st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
