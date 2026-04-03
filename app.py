@@ -63,7 +63,7 @@ st.markdown("""
 
 
 # ══════════════════════════════════════════════════════
-# DATABASE  (users + predictions — same file)
+# DATABASE
 # ══════════════════════════════════════════════════════
 DB_FILE = "users.db"
 
@@ -71,8 +71,6 @@ DB_FILE = "users.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
-
-    # Users table
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
@@ -80,8 +78,6 @@ def init_db():
             role     TEXT NOT NULL DEFAULT 'user'
         )
     """)
-
-    # Predictions table
     c.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,8 +91,6 @@ def init_db():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_pred_user ON predictions (username)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions (created_at DESC)")
-
-    # Default admin
     admin_pass = hashlib.sha256("admin2024".encode()).hexdigest()
     c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
               ("admin", admin_pass, "admin"))
@@ -162,10 +156,9 @@ def reset_password(target_username, new_password):
     return updated
 
 
-# ── Prediction helpers  ────────────────────────────────
+# ── Prediction helpers ─────────────────────────────────
 
 def save_prediction(username, fruit_count, total_juice_ml, snapshot_b64=None):
-    """Save one prediction session to the database."""
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
     c.execute("""
@@ -179,7 +172,7 @@ def save_prediction(username, fruit_count, total_juice_ml, snapshot_b64=None):
 
 
 def get_predictions(username, is_admin=False, limit=200):
-    """Fetch history rows. Admin gets all users."""
+    """Admin gets all users; regular user gets only their own rows."""
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
     if is_admin:
@@ -199,7 +192,6 @@ def get_predictions(username, is_admin=False, limit=200):
 
 
 def get_snapshot(pred_id):
-    """Return the base-64 snapshot PNG for one prediction."""
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
     c.execute("SELECT snapshot_b64 FROM predictions WHERE id = ?", (pred_id,))
@@ -214,6 +206,7 @@ def delete_prediction(pred_id, username, is_admin=False):
     if is_admin:
         c.execute("DELETE FROM predictions WHERE id = ?", (pred_id,))
     else:
+        # User can only delete their own records
         c.execute("DELETE FROM predictions WHERE id = ? AND username = ?", (pred_id, username))
     conn.commit()
     deleted = c.rowcount > 0
@@ -234,7 +227,6 @@ def user_stats(username):
 
 
 def frame_to_b64(rgb_array, max_side=640):
-    """Encode annotated RGB frame as base-64 PNG string."""
     img = Image.fromarray(rgb_array.astype("uint8"))
     w, h = img.size
     if max(w, h) > max_side:
@@ -245,7 +237,6 @@ def frame_to_b64(rgb_array, max_side=640):
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-# Initialise DB on every startup (safe — uses IF NOT EXISTS)
 init_db()
 
 
@@ -351,12 +342,17 @@ role     = st.session_state.get("role", "guest")
 username = st.session_state.get("username", "Guest")
 is_admin = role == "admin"
 
+# ── Sidebar navigation ─────────────────────────────────
 with st.sidebar:
     st.markdown("## Navigation")
+
+    # Admin: View all history, Manage Users, Model Performance
+    # User:  Home Page, Predict Page, History page
     if is_admin:
-        pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History", "👥 Manage Users", "📊 Model Performance"]
+        pages = ["🕐 View All History", "👥 Manage Users", "📊 Model Performance"]
     else:
         pages = ["🏠 Home", "🔍 Predict Juice Yield", "🕐 History"]
+
     page = st.radio("Go to", pages)
     st.markdown("---")
     st.markdown(f"👤 **{username}**")
@@ -554,7 +550,7 @@ class CalamansiDetector(VideoProcessorBase):
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 1: HOME
+# PAGE 1: HOME  (User only)
 # ══════════════════════════════════════════════════════
 if page == "🏠 Home":
     st.markdown('<div class="main-title">🍋 Calamansi Juice Yield Prediction System</div>', unsafe_allow_html=True)
@@ -620,7 +616,7 @@ if page == "🏠 Home":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 2: PREDICT
+# PAGE 2: PREDICT  (User only)
 # ══════════════════════════════════════════════════════
 elif page == "🔍 Predict Juice Yield":
     st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
@@ -662,7 +658,6 @@ elif page == "🔍 Predict Juice Yield":
                 predictions = predict_from_features(features)
                 total_juice = sum(predictions)
 
-                # ── Save to history ──────────────────────────────────
                 snapshot_b64 = frame_to_b64(annotated) if annotated is not None else None
                 pred_id = save_prediction(
                     username       = username,
@@ -671,7 +666,6 @@ elif page == "🔍 Predict Juice Yield":
                     snapshot_b64   = snapshot_b64,
                 )
                 st.success(f"✅ {len(features)} calamansi detected! Saved as record #{pred_id}.")
-                # ─────────────────────────────────────────────────────
 
                 if annotated is not None:
                     st.image(annotated, caption=f"Captured — {len(features)} fruits detected",
@@ -683,10 +677,16 @@ elif page == "🔍 Predict Juice Yield":
 
 # ══════════════════════════════════════════════════════
 # PAGE 3: HISTORY
+# User  → "🕐 History"        — own records only, own stats, delete own
+# Admin → "🕐 View All History" — all users' records, full stats, user filter, delete any
 # ══════════════════════════════════════════════════════
-elif page == "🕐 History":
-    st.markdown('<div class="main-title">🕐 Prediction History</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Past juice yield prediction sessions</div>', unsafe_allow_html=True)
+elif page in ("🕐 History", "🕐 View All History"):
+    if is_admin:
+        st.markdown('<div class="main-title">🕐 View All History</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-title">All users\' juice yield prediction sessions</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="main-title">🕐 Prediction History</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-title">Your past juice yield prediction sessions</div>', unsafe_allow_html=True)
     st.divider()
 
     rows = get_predictions(username, is_admin=is_admin)
@@ -695,19 +695,20 @@ elif page == "🕐 History":
         st.info("No predictions yet. Run a session on the Predict page to see results here.")
         st.stop()
 
-    # Build DataFrame
     df = pd.DataFrame(rows, columns=["id", "user", "date", "fruits", "juice_ml"])
     df["date"]     = pd.to_datetime(df["date"])
     df["juice_ml"] = df["juice_ml"].round(1)
 
-    # ── Summary stats ──────────────────────────────────────────────────────────
+    # ── Summary stats ──────────────────────────────────
     if is_admin:
+        # Admin: aggregate stats across all users
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Sessions", len(df))
         c2.metric("Unique Users",   df["user"].nunique())
         c3.metric("Total Fruits",   int(df["fruits"].sum()))
         c4.metric("Total Juice",    f"{df['juice_ml'].sum():.1f} mL")
     else:
+        # User: only their own stats
         stats = user_stats(username)
         c1, c2, c3 = st.columns(3)
         c1.metric("My Sessions",  stats["sessions"])
@@ -716,23 +717,29 @@ elif page == "🕐 History":
 
     st.divider()
 
-    # ── Admin user filter ──────────────────────────────────────────────────────
+    # ── Admin-only: filter by user ─────────────────────
     if is_admin:
         all_users = ["All"] + sorted(df["user"].unique().tolist())
         sel_user  = st.selectbox("Filter by user", all_users)
         if sel_user != "All":
             df = df[df["user"] == sel_user]
 
-    # ── Table ──────────────────────────────────────────────────────────────────
-    display_cols   = ["user", "date", "fruits", "juice_ml"] if is_admin else ["date", "fruits", "juice_ml"]
-    col_labels     = {"user": "User", "date": "Date & Time", "fruits": "Fruits", "juice_ml": "Juice (mL)"}
+    # ── Table ──────────────────────────────────────────
+    # Admin sees the "user" column; regular users do not
+    if is_admin:
+        display_cols = ["user", "date", "fruits", "juice_ml"]
+        col_labels   = {"user": "User", "date": "Date & Time", "fruits": "Fruits", "juice_ml": "Juice (mL)"}
+    else:
+        display_cols = ["date", "fruits", "juice_ml"]
+        col_labels   = {"date": "Date & Time", "fruits": "Fruits", "juice_ml": "Juice (mL)"}
+
     st.dataframe(
         df[display_cols].rename(columns=col_labels),
         use_container_width=True,
         hide_index=True,
     )
 
-    # ── Row detail ─────────────────────────────────────────────────────────────
+    # ── Session detail ─────────────────────────────────
     st.divider()
     st.markdown('<div class="section-header">🔍 View Session Detail</div>', unsafe_allow_html=True)
 
@@ -760,13 +767,14 @@ elif page == "🕐 History":
     with col_info:
         st.markdown("**Session Details**")
         if is_admin:
-            st.write(f"**User:** {sel_row['user']}")
+            st.write(f"**User:** {sel_row['user']}")   # Admin sees who owns this record
         st.write(f"**Date:** {sel_row['date'].strftime('%Y-%m-%d %H:%M:%S')}")
         st.write(f"**Fruits detected:** {sel_row['fruits']}")
         st.write(f"**Juice yield:** {sel_row['juice_ml']} mL")
 
         st.divider()
 
+        # Admin can delete any record; user can only delete their own
         can_delete = is_admin or sel_row["user"] == username
         if can_delete:
             if st.button("🗑️ Delete this record", type="secondary"):
@@ -778,19 +786,18 @@ elif page == "🕐 History":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 4: MANAGE USERS (ADMIN ONLY)
+# PAGE 4: MANAGE USERS  (Admin only)
 # ══════════════════════════════════════════════════════
 elif page == "👥 Manage Users":
-    st.markdown('<div class="main-title">👥 User Management</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Admin can manage system users</div>', unsafe_allow_html=True)
-    st.divider()
-
     if not is_admin:
         st.error("❌ Access denied. Admins only.")
         st.stop()
 
-    users = get_all_users()
+    st.markdown('<div class="main-title">👥 User Management</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Admin can manage system users</div>', unsafe_allow_html=True)
+    st.divider()
 
+    users = get_all_users()
     if not users:
         st.info("No users found.")
         st.stop()
@@ -802,7 +809,6 @@ elif page == "👥 Manage Users":
 
     st.divider()
     st.markdown("### ➕ Create New User")
-
     with st.expander("Create a new user account", expanded=False):
         nu_user  = st.text_input("Username",         key="nu_user",  placeholder="Enter username")
         nu_pass  = st.text_input("Password",          type="password", key="nu_pass",  placeholder="Enter password")
@@ -826,13 +832,11 @@ elif page == "👥 Manage Users":
 
     st.divider()
     st.markdown("### ⚙️ Manage Existing User")
-
     manageable_users = df_users["username"].tolist()
     selected_user = st.selectbox("Select User", manageable_users)
 
     col1, col2 = st.columns(2)
 
-    # 🔑 RESET PASSWORD
     with col1:
         st.markdown("#### 🔑 Reset Password")
         new_pass = st.text_input("New Password", type="password", key="reset_pass")
@@ -847,7 +851,6 @@ elif page == "👥 Manage Users":
                 else:
                     st.error("❌ Failed to reset password.")
 
-    # 🗑️ DELETE USER
     with col2:
         st.markdown("#### 🗑️ Delete User")
         st.warning(f"This will permanently delete **{selected_user}** and cannot be undone.")
@@ -865,16 +868,16 @@ elif page == "👥 Manage Users":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 5: MODEL PERFORMANCE (ADMIN ONLY)
+# PAGE 5: MODEL PERFORMANCE  (Admin only)
 # ══════════════════════════════════════════════════════
 elif page == "📊 Model Performance":
-    st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Evaluation metrics of the Linear Regression model</div>', unsafe_allow_html=True)
-    st.divider()
-
     if not is_admin:
         st.error("❌ Access denied. Admins only.")
         st.stop()
+
+    st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Evaluation metrics of the Linear Regression model</div>', unsafe_allow_html=True)
+    st.divider()
 
     if not model_loaded:
         st.error("❌ Model not found."); st.stop()
