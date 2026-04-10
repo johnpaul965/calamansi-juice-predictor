@@ -562,7 +562,7 @@ if page == "🏠 Home":
         st.markdown('<div class="section-header">📌 About This System</div>', unsafe_allow_html=True)
         st.write("""
         This system predicts the **juice yield (mL)** of Calamansi fruits *(Citrus microcarpa)*
-        using live camera detection and linear regression. Spread calamansi flat in a basket,
+        using live camera detection and linear regression. Spread calamansi flat,
         point the camera above, and the system detects each individual fruit in real-time and
         predicts the juice yield — then tells you what you can make with it.
         """)
