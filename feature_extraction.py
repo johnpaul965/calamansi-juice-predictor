@@ -22,18 +22,18 @@ FEATURE_COLS = [
 # leaves, green surfaces, and skin tones
 # ─────────────────────────────────────────
 # Green calamansi (unripe)
-HSV_GREEN_LO = np.array([28, 50, 50])   # was [25,15,40] — requires more saturation
-HSV_GREEN_HI = np.array([85, 255, 200]) # was [95,255,210]
+HSV_GREEN_LO = np.array([20, 40, 20])   # lowered V:50→20, S:50→40 for dark fruits
+HSV_GREEN_HI = np.array([88, 255, 210])
 # Yellow-orange calamansi (ripe)
-HSV_RIPE_LO  = np.array([15, 60, 80])   # was [10,30,60] — tighter hue + more sat
-HSV_RIPE_HI  = np.array([35, 255, 255]) # was [40,255,255]
+HSV_RIPE_LO  = np.array([12, 40, 50])   # lowered thresholds for ripe fruits
+HSV_RIPE_HI  = np.array([38, 255, 255])
 
 # Minimum saturation for a pixel region to count as fruit
-MIN_AVG_SAT  = 55   # was 40
-MIN_SAT_VAL  = 55   # was 40 (per-circle center check)
+MIN_AVG_SAT  = 35   # lowered: dark green fruits have lower avg saturation
+MIN_SAT_VAL  = 35   # lowered: per-circle center saturation check
 
 # Minimum mask coverage for the frame to proceed
-MIN_COVERAGE = 0.04  # was 0.03 — slightly stricter
+MIN_COVERAGE = 0.02  # lowered: small number of fruits has low coverage
 
 # Hough circle overlap requirement
 MIN_OVERLAP  = 0.50  # was 0.30 — circle must overlap 50% with color mask
@@ -137,11 +137,11 @@ def _has_fruit_color(hsv, mask_region):
     # Must have enough saturation (not grey/white background)
     if avg_sat < MIN_AVG_SAT:
         return False
-    # Hue must be in calamansi range: green (28–85) or ripe yellow-orange (15–35)
-    if not (15 <= avg_hue <= 85):
+    # Hue must be in calamansi range: green (20–88) or ripe yellow-orange (12–38)
+    if not (12 <= avg_hue <= 88):
         return False
     # Must not be too dark (shadow) or too bright (glare/reflection)
-    if avg_val < 40 or avg_val > 230:
+    if avg_val < 20 or avg_val > 230:
         return False
     return True
 
@@ -305,9 +305,9 @@ def count_hough(img_blur, mask):
         cv2.HOUGH_GRADIENT,
         dp=1.2,
         minDist=38,       # slightly larger min distance between circles
-        param1=60,        # STRICTER: was 50 — stronger Canny edge threshold
-        param2=28,        # STRICTER: was 22 — more votes needed (fewer false circles)
-        minRadius=13,     # STRICTER: was 10
+        param1=50,        # restored: dark fruits need lower Canny threshold
+        param2=24,        # slightly relaxed for dark low-contrast fruits
+        minRadius=10,     # restored: small fruits need lower minRadius
         maxRadius=42      # slightly tightened: was 45
     )
     if circles is None:
