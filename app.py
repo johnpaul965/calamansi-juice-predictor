@@ -872,7 +872,7 @@ elif page == "👥 Manage Users":
 # ══════════════════════════════════════════════════════
 elif page == "📊 Model Performance":
     if not is_admin:
-        st.error("❌ Access denied. Admins only.")
+        st.error("❌ Access denied. Admins only. ")
         st.stop()
 
     st.markdown('<div class="main-title">📊 Model Performance</div>', unsafe_allow_html=True)
