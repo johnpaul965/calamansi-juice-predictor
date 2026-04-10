@@ -608,7 +608,7 @@ if page == "🏠 Home":
     st.divider()
     st.markdown('<div class="section-header">⚙️ How the System Works</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: st.markdown('<div class="step-box">🧺 <b>Step 1</b><br>Spread calamansi flat in a basket</div>', unsafe_allow_html=True)
+    with c1: st.markdown('<div class="step-box">🧺 <b>Step 1</b><br>Spread calamansi flat</div>', unsafe_allow_html=True)
     with c2: st.markdown('<div class="step-box">📷 <b>Step 2</b><br>Open live camera — point directly above</div>', unsafe_allow_html=True)
     with c3: st.markdown('<div class="step-box">🔬 <b>Step 3</b><br>System detects each fruit in real-time</div>', unsafe_allow_html=True)
     with c4: st.markdown('<div class="step-box">💧 <b>Step 4</b><br>Click Predict — get juice yield per fruit</div>', unsafe_allow_html=True)
