@@ -580,7 +580,7 @@ if page == "🏠 Home":
         |------|--------|
         | Fruit | Calamansi *(Citrus microcarpa)* |
         | Input | Live Camera |
-        | Setup | Spread flat in basket |
+        | Setup | Spread flat |
         | Output | Count + juice + recommendations |
         | Model | Linear Regression |
         | Features | Shape + Color |
@@ -620,7 +620,7 @@ if page == "🏠 Home":
 # ══════════════════════════════════════════════════════
 elif page == "🔍 Predict Juice Yield":
     st.markdown('<div class="main-title">🔍 Predict Juice Yield</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Spread calamansi flat in a basket — point camera from above</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Spread calamansi flat — point camera from above</div>', unsafe_allow_html=True)
     st.divider()
 
     if not model_loaded:
@@ -629,9 +629,9 @@ elif page == "🔍 Predict Juice Yield":
 
     st.markdown("""
     **How to use:**
-    1. Spread calamansi in a basket so each fruit is visible
+    1. Spread calamansi so each fruit is visible
     2. Click **Start** to open the live camera
-    3. Hold camera directly above the basket
+    3. Hold camera directly above
     4. Green boxes will appear on each detected fruit in real-time
     5. When all fruits are clearly visible — click **📸 Predict Now**
     """)
