@@ -18,25 +18,20 @@ FEATURE_COLS = [
 
 # ─────────────────────────────────────────
 # HSV COLOR RANGES FOR CALAMANSI
-# Tightened to reduce false positives from
-# leaves, green surfaces, and skin tones
 # ─────────────────────────────────────────
-# Green calamansi (unripe) — dark olive-green fruits, hue 30–85, low saturation/value
-HSV_GREEN_LO = np.array([25, 30, 15])   # lower S+V for very dark/shadowed fruits
-HSV_GREEN_HI = np.array([90, 255, 220]) # raised V ceiling: was 210
+# Green calamansi (unripe)
+HSV_GREEN_LO = np.array([25, 30, 15])
+HSV_GREEN_HI = np.array([90, 255, 220])
 # Yellow-orange calamansi (ripe)
-HSV_RIPE_LO  = np.array([10, 35, 40])   # slightly looser for ripe fruits
+HSV_RIPE_LO  = np.array([10, 35, 40])
 HSV_RIPE_HI  = np.array([40, 255, 255])
 
-# Minimum saturation for a pixel region to count as fruit
-MIN_AVG_SAT  = 25   # dark olive-green calamansi have naturally low avg saturation
-MIN_SAT_VAL  = 25   # per-circle center saturation check — dark skins need lower bar
+MIN_AVG_SAT  = 25
+MIN_SAT_VAL  = 25
+MIN_COVERAGE = 0.01
 
-# Minimum mask coverage for the frame to proceed
-MIN_COVERAGE = 0.01  # few small fruits on white surface = very low coverage
-
-# Hough circle overlap requirement
-MIN_OVERLAP  = 0.35  # dark fruits produce sparse masks; 50% overlap is too strict
+# FIX #2: Raised overlap threshold to reduce ghost detections
+MIN_OVERLAP  = 0.50   # was 0.35
 
 
 def _square_crop(image_array):
@@ -109,13 +104,13 @@ def detect_basket(img_blur):
 def is_calamansi(cnt, ppc):
     """Strict shape + size check for a contour to be a calamansi."""
     area = cv2.contourArea(cnt)
-    if area < 100:   # STRICTER: was 50 — ignore tiny noise blobs
+    if area < 100:
         return False
     peri = cv2.arcLength(cnt, True)
     if peri == 0:
         return False
     circularity = (4 * np.pi * area) / (peri ** 2)
-    if circularity < MIN_CIRCULARITY:   # STRICTER: was 0.25
+    if circularity < MIN_CIRCULARITY:
         return False
     (_, _), r = cv2.minEnclosingCircle(cnt)
     d = (2 * r) / ppc
@@ -134,13 +129,10 @@ def _has_fruit_color(hsv, mask_region):
     avg_hue = np.mean(px[:, 0])
     avg_val = np.mean(px[:, 2])
 
-    # Must have some saturation (not grey/white background)
     if avg_sat < MIN_AVG_SAT:
         return False
-    # Hue must be in calamansi range: green (25–90) or ripe yellow-orange (10–40)
     if not (10 <= avg_hue <= 90):
         return False
-    # Reject near-black (deep shadow) or pure white (overexposed / background paper)
     if avg_val < 15 or avg_val > 235:
         return False
     return True
@@ -172,7 +164,11 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     """Watershed segmentation to get individual fruit features."""
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    _, sure_fg = cv2.threshold(dist_norm, 0.4 * dist_norm.max(), 255, 0)
+
+    # FIX #3: Raised threshold from 0.4 → 0.55 to prevent watershed
+    # from splitting a single fruit into two regions when fruits are touching
+    _, sure_fg = cv2.threshold(dist_norm, 0.55 * dist_norm.max(), 255, 0)
+
     sure_fg    = np.uint8(sure_fg)
     sure_bg    = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
     unknown    = cv2.subtract(sure_bg, sure_fg)
@@ -194,7 +190,6 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
         cnt = max(cs, key=cv2.contourArea)
         if not is_calamansi(cnt, ppc):
             continue
-        # NEW: color validation on watershed region
         if not _has_fruit_color(hsv, seg):
             continue
         f = compute_features(cnt, mask, hsv, ppc)
@@ -208,7 +203,6 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
         for cnt in cs:
             if not is_calamansi(cnt, ppc):
                 continue
-            # NEW: color validation on contour region
             single = np.zeros(mask.shape, dtype=np.uint8)
             cv2.drawContours(single, [cnt], -1, 255, -1)
             if not _has_fruit_color(hsv, single):
@@ -242,7 +236,6 @@ def get_features_from_hough(img_blur, circles, ppc):
         if not (MIN_DIAMETER_CM <= diam_cm <= MAX_DIAMETER_CM):
             continue
 
-        # NEW: color validation inside the circle region
         mask_c = np.zeros(img_blur.shape[:2], dtype=np.uint8)
         cv2.circle(mask_c, (x, y), r, 255, -1)
         if not _has_fruit_color(hsv, mask_c):
@@ -304,11 +297,17 @@ def count_hough(img_blur, mask):
         gray,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
-        minDist=28,       # reduced: fruits are close together in a basket/pile
-        param1=45,        # slightly lower Canny threshold for dark low-contrast fruits
-        param2=18,        # relaxed accumulator threshold — catches more real circles
-        minRadius=8,      # smaller min to catch partially visible/smaller fruits
-        maxRadius=42      # unchanged
+        # FIX #1: Raised minDist from 28 → 45 to prevent placing two
+        # circle centers on the same fruit when fruits are close together.
+        # At ~41 px/cm and avg diameter 2.5cm, one fruit ≈ 103px wide,
+        # so centers should be at least ~45px apart to be distinct fruits.
+        minDist=45,
+        param1=45,
+        # FIX #4: Raised param2 from 18 → 22 to reduce weak/fake circles
+        # detected on fruit edges, shadows, and glare spots.
+        param2=22,
+        minRadius=8,
+        maxRadius=42
     )
     if circles is None:
         return []
@@ -318,22 +317,18 @@ def count_hough(img_blur, mask):
     for x, y, r in circles:
         if not (0 <= y < gray.shape[0] and 0 <= x < gray.shape[1]):
             continue
-        # Sample a small patch around center instead of single pixel (more robust)
         y1, y2 = max(0, y-2), min(gray.shape[0], y+3)
         x1, x2 = max(0, x-2), min(gray.shape[1], x+3)
         center_gray = float(np.mean(gray[y1:y2, x1:x2]))
         if center_gray > bright_thresh:
             continue
 
-        # Sample HSV from patch rather than single pixel
         h_val = int(np.mean(hsv[y1:y2, x1:x2, 0]))
         s_val = int(np.mean(hsv[y1:y2, x1:x2, 1]))
 
-        # Must be green or yellow-orange AND reasonably saturated
         if not (10 <= h_val <= 90 and s_val > MIN_SAT_VAL):
             continue
 
-        # STRICTER: circle must overlap ≥50% with the color mask (was 30%)
         circle_mask = np.zeros(mask.shape, dtype=np.uint8)
         cv2.circle(circle_mask, (x, y), r, 255, -1)
         overlap     = np.sum(cv2.bitwise_and(mask, circle_mask) > 0)
@@ -341,7 +336,6 @@ def count_hough(img_blur, mask):
         if overlap / circle_area < MIN_OVERLAP:
             continue
 
-        # NEW Guard 3: full color validation on circle region
         if not _has_fruit_color(hsv, circle_mask):
             continue
 
