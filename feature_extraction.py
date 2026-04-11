@@ -18,19 +18,26 @@ FEATURE_COLS = [
 
 # ─────────────────────────────────────────
 # HSV COLOR RANGES FOR CALAMANSI
+# Tightened to exclude dark wood/shelf backgrounds
+# which have low saturation and low value like
+# shadowed fruit but are NOT fruit.
 # ─────────────────────────────────────────
 # Green calamansi (unripe)
-HSV_GREEN_LO = np.array([25, 30, 15])
-HSV_GREEN_HI = np.array([90, 255, 220])
+# FIX #1: Raised S floor 30→45, V floor 15→35 to exclude dark wood grain
+HSV_GREEN_LO = np.array([28, 45, 35])
+HSV_GREEN_HI = np.array([88, 255, 210])
 # Yellow-orange calamansi (ripe)
-HSV_RIPE_LO  = np.array([10, 35, 40])
-HSV_RIPE_HI  = np.array([40, 255, 255])
+# FIX #1: Raised S floor 35→50, V floor 40→50 for same reason
+HSV_RIPE_LO  = np.array([12, 50, 50])
+HSV_RIPE_HI  = np.array([38, 255, 255])
 
-MIN_AVG_SAT  = 25
-MIN_SAT_VAL  = 25
+# FIX #1: Raised saturation thresholds — wood/shelf has naturally low saturation
+MIN_AVG_SAT  = 40   # was 25
+MIN_SAT_VAL  = 40   # was 25
+
 MIN_COVERAGE = 0.01
 
-# FIX #2: Raised overlap threshold to reduce ghost detections
+# Raised overlap threshold to reduce ghost detections
 MIN_OVERLAP  = 0.50   # was 0.35
 
 
@@ -52,8 +59,14 @@ def preprocess_image(image_path):
 
 
 def preprocess_array(image_array):
+    cropped = _square_crop(image_array)
+    # FIX #3: Trim 10% from left edge to remove shelf/background bleed-in
+    # that appears on the left side of the frame.
+    # Remove this line if your camera framing no longer shows the shelf.
+    h, w = cropped.shape[:2]
+    cropped = cropped[:, int(w * 0.10):]
     return cv2.GaussianBlur(
-        cv2.resize(_square_crop(image_array), (512, 512)),
+        cv2.resize(cropped, (512, 512)),
         (5, 5), 0)
 
 
@@ -65,6 +78,17 @@ def segment_fruit(img_blur):
     k     = np.ones((3, 3), np.uint8)
     mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+
+    # FIX #2: Remove blobs too large to be individual fruits.
+    # Shelves, tables, and backgrounds register as one giant connected blob.
+    # Max plausible single-fruit area = circle with diameter MAX_DIAMETER_CM,
+    # so anything 3x larger than that is certainly background, not a fruit.
+    max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in cnts:
+        if cv2.contourArea(cnt) > max_fruit_area_px * 3:
+            cv2.drawContours(mask, [cnt], -1, 0, -1)  # erase oversized blob
+
     return mask, hsv
 
 
@@ -120,7 +144,7 @@ def is_calamansi(cnt, ppc):
 def _has_fruit_color(hsv, mask_region):
     """
     Validate that a detected region actually has calamansi color.
-    Returns False if the region looks like a plain background or bright glare.
+    Returns False if the region looks like plain background, wood, or glare.
     """
     px = hsv[mask_region > 0]
     if len(px) == 0:
@@ -129,11 +153,14 @@ def _has_fruit_color(hsv, mask_region):
     avg_hue = np.mean(px[:, 0])
     avg_val = np.mean(px[:, 2])
 
+    # Must have meaningful saturation (not grey/white background or wood)
     if avg_sat < MIN_AVG_SAT:
         return False
+    # Hue must be in calamansi range: green (28–88) or ripe yellow-orange (12–38)
     if not (10 <= avg_hue <= 90):
         return False
-    if avg_val < 15 or avg_val > 235:
+    # Reject near-black (deep shadow) or pure white (overexposed / background)
+    if avg_val < 30 or avg_val > 235:
         return False
     return True
 
@@ -165,8 +192,8 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # FIX #3: Raised threshold from 0.4 → 0.55 to prevent watershed
-    # from splitting a single fruit into two regions when fruits are touching
+    # Raised threshold 0.4→0.55 to prevent watershed splitting
+    # a single touching fruit into two separate regions
     _, sure_fg = cv2.threshold(dist_norm, 0.55 * dist_norm.max(), 255, 0)
 
     sure_fg    = np.uint8(sure_fg)
@@ -297,14 +324,12 @@ def count_hough(img_blur, mask):
         gray,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
-        # FIX #1: Raised minDist from 28 → 45 to prevent placing two
-        # circle centers on the same fruit when fruits are close together.
-        # At ~41 px/cm and avg diameter 2.5cm, one fruit ≈ 103px wide,
-        # so centers should be at least ~45px apart to be distinct fruits.
+        # Raised minDist 28→45 to prevent two circle centers
+        # being placed on the same fruit
         minDist=45,
         param1=45,
-        # FIX #4: Raised param2 from 18 → 22 to reduce weak/fake circles
-        # detected on fruit edges, shadows, and glare spots.
+        # Raised param2 18→22 to reduce weak/fake circles
+        # on edges, shadows, and glare spots
         param2=22,
         minRadius=8,
         maxRadius=42
