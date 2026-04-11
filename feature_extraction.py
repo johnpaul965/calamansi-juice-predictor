@@ -7,9 +7,9 @@ import numpy as np
 # ─────────────────────────────────────────
 
 PIXELS_PER_CM   = 41.0
-MIN_CIRCULARITY = 0.40   # relaxed: camera angle makes calamansi appear slightly oval
-MIN_DIAMETER_CM = 1.5    # relaxed: catch smaller fruits in frame
-MAX_DIAMETER_CM = 4.5    # calamansi rarely exceeds 4.5cm
+MIN_CIRCULARITY = 0.40
+MIN_DIAMETER_CM = 1.5
+MAX_DIAMETER_CM = 4.5
 
 FEATURE_COLS = [
     'area_cm2', 'diameter_cm', 'perimeter_cm', 'circularity',
@@ -18,27 +18,29 @@ FEATURE_COLS = [
 
 # ─────────────────────────────────────────
 # HSV COLOR RANGES FOR CALAMANSI
-# Tightened to exclude dark wood/shelf backgrounds
-# which have low saturation and low value like
-# shadowed fruit but are NOT fruit.
+# Tightened to exclude dark wood/shelf backgrounds.
 # ─────────────────────────────────────────
 # Green calamansi (unripe)
-# FIX #1: Raised S floor 30→45, V floor 15→35 to exclude dark wood grain
 HSV_GREEN_LO = np.array([28, 45, 35])
 HSV_GREEN_HI = np.array([88, 255, 210])
 # Yellow-orange calamansi (ripe)
-# FIX #1: Raised S floor 35→50, V floor 40→50 for same reason
 HSV_RIPE_LO  = np.array([12, 50, 50])
 HSV_RIPE_HI  = np.array([38, 255, 255])
 
-# FIX #1: Raised saturation thresholds — wood/shelf has naturally low saturation
-MIN_AVG_SAT  = 40   # was 25
-MIN_SAT_VAL  = 40   # was 25
-
+MIN_AVG_SAT  = 40
+MIN_SAT_VAL  = 40
 MIN_COVERAGE = 0.01
+MIN_OVERLAP  = 0.50
 
-# Raised overlap threshold to reduce ghost detections
-MIN_OVERLAP  = 0.50   # was 0.35
+# ─────────────────────────────────────────
+# SCENE VALIDATION THRESHOLDS
+# A valid scan: plain light background, fruit
+# mask covers only a modest portion of frame.
+# ─────────────────────────────────────────
+MAX_FRUIT_COVERAGE = 0.40   # >40% masked = background noise, not fruit
+MIN_BG_MEAN        = 100    # background must be reasonably bright (light surface)
+MAX_BG_STD         = 55     # background must be plain (low variance)
+                            # cluttered rooms/desks have high std
 
 
 def _square_crop(image_array):
@@ -60,8 +62,7 @@ def preprocess_image(image_path):
 
 def preprocess_array(image_array):
     cropped = _square_crop(image_array)
-    # FIX #3: Trim 10% from left edge to remove shelf/background bleed-in
-    # that appears on the left side of the frame.
+    # Trim 10% from left edge to remove shelf/background bleed-in on the left.
     # Remove this line if your camera framing no longer shows the shelf.
     h, w = cropped.shape[:2]
     cropped = cropped[:, int(w * 0.10):]
@@ -79,17 +80,57 @@ def segment_fruit(img_blur):
     mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
 
-    # FIX #2: Remove blobs too large to be individual fruits.
-    # Shelves, tables, and backgrounds register as one giant connected blob.
-    # Max plausible single-fruit area = circle with diameter MAX_DIAMETER_CM,
-    # so anything 3x larger than that is certainly background, not a fruit.
+    # Remove blobs too large to be individual fruits.
+    # Shelves/tables register as one giant connected blob.
     max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in cnts:
         if cv2.contourArea(cnt) > max_fruit_area_px * 3:
-            cv2.drawContours(mask, [cnt], -1, 0, -1)  # erase oversized blob
+            cv2.drawContours(mask, [cnt], -1, 0, -1)
 
     return mask, hsv
+
+
+def _is_valid_scan_scene(img_blur, mask):
+    """
+    Reject frames that don't look like a proper fruit scan.
+
+    A valid scan has:
+      - Fruit mask covering only a small-to-moderate portion of frame
+        (not flooding 40%+ which means background noise was segmented)
+      - A mostly plain, bright background (white paper / table surface)
+        with low pixel variance — cluttered rooms score high std
+
+    Returns True only if the scene passes all checks.
+    """
+    H, W     = img_blur.shape[:2]
+    total_px = H * W
+    fruit_px = int(np.sum(mask > 0))
+
+    # Check 1: mask coverage
+    # If fruit mask floods more than 40% of the frame it's almost
+    # certainly background objects being misidentified, not real fruit.
+    coverage = fruit_px / total_px
+    if coverage > MAX_FRUIT_COVERAGE:
+        return False
+
+    # Check 2: background must be plain and bright
+    # Analyse the pixels NOT covered by the fruit mask.
+    bg_mask  = cv2.bitwise_not(mask)
+    gray     = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    bg_pixels = gray[bg_mask > 0]
+
+    if len(bg_pixels) > 0:
+        bg_mean = float(np.mean(bg_pixels))
+        bg_std  = float(np.std(bg_pixels))
+
+        # Dark or cluttered background (desk, room, cat, cables …)
+        if bg_mean < MIN_BG_MEAN:
+            return False
+        if bg_std > MAX_BG_STD:
+            return False
+
+    return True
 
 
 def detect_basket(img_blur):
@@ -144,7 +185,7 @@ def is_calamansi(cnt, ppc):
 def _has_fruit_color(hsv, mask_region):
     """
     Validate that a detected region actually has calamansi color.
-    Returns False if the region looks like plain background, wood, or glare.
+    Returns False if the region looks like background, wood, or glare.
     """
     px = hsv[mask_region > 0]
     if len(px) == 0:
@@ -153,13 +194,10 @@ def _has_fruit_color(hsv, mask_region):
     avg_hue = np.mean(px[:, 0])
     avg_val = np.mean(px[:, 2])
 
-    # Must have meaningful saturation (not grey/white background or wood)
     if avg_sat < MIN_AVG_SAT:
         return False
-    # Hue must be in calamansi range: green (28–88) or ripe yellow-orange (12–38)
     if not (10 <= avg_hue <= 90):
         return False
-    # Reject near-black (deep shadow) or pure white (overexposed / background)
     if avg_val < 30 or avg_val > 235:
         return False
     return True
@@ -317,6 +355,11 @@ def count_hough(img_blur, mask):
         if avg_sat < MIN_AVG_SAT:
             return []
 
+    # Guard 3: Scene must look like a proper fruit scan setup.
+    # Rejects cluttered rooms, desks, pets, cables, etc.
+    if not _is_valid_scan_scene(img_blur, mask):
+        return []
+
     mean_v = float(gray.mean())
     bright_thresh = min(155, int(mean_v + 10))
 
@@ -324,12 +367,8 @@ def count_hough(img_blur, mask):
         gray,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
-        # Raised minDist 28→45 to prevent two circle centers
-        # being placed on the same fruit
         minDist=45,
         param1=45,
-        # Raised param2 18→22 to reduce weak/fake circles
-        # on edges, shadows, and glare spots
         param2=22,
         minRadius=8,
         maxRadius=42
@@ -394,6 +433,19 @@ def process_video_frames(frames_rgb):
     1. Picks best frame (most fruits visible)
     2. Detects each individual calamansi using watershed
     3. Returns features per fruit for juice prediction
+
+    Returns None if no valid scan scene is found across all frames.
+    The caller (Streamlit app) should check for None and show a warning:
+
+        result = process_video_frames(frames)
+        if result is None or result['fruit_count'] == 0:
+            st.warning("⚠️ No calamansi detected. Point the camera at "
+                       "fruits on a plain white surface.")
+        elif result['fruit_count'] > 30:
+            st.warning("⚠️ Too many detections — ensure only fruits are "
+                       "in frame on a plain background.")
+        else:
+            st.success(f"✅ {result['fruit_count']} calamansi detected!")
     """
     best_frame = None
     best_count = 0
@@ -401,7 +453,7 @@ def process_video_frames(frames_rgb):
     for frame_rgb in frames_rgb:
         img_blur  = preprocess_array(frame_rgb)
         mask, hsv = segment_fruit(img_blur)
-        circles   = count_hough(img_blur, mask)
+        circles   = count_hough(img_blur, mask)  # returns [] if scene invalid
         if len(circles) > best_count:
             best_count = len(circles)
             best_frame = {
