@@ -298,12 +298,11 @@ def _dedup_contours(feats, cnts):
     """
     Aggressive deduplication of contours.
 
-    Two contours are considered the SAME fruit if either:
-      (a) their enclosing-circle centers are within 1 radius of each other, OR
-      (b) the smaller circle's center falls INSIDE the larger circle.
+    FIX 2: Widened merge radius from 1.2x to 2.0x max_r so that large
+    fruits split into top/bottom halves still get merged at close range.
 
-    Only the contour with the largest area is kept per group.
-    This handles the fruit+shadow split seen in the screenshots.
+    FIX 3: Secondary pass removes any remaining overlapping pairs
+    (overlap > 70%) keeping only the largest contour.
     """
     if len(cnts) <= 1:
         return feats, cnts
@@ -332,9 +331,8 @@ def _dedup_contours(feats, cnts):
             cx_j, cy_j, r_j, _ = info[j]
             dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
             max_r = max(r_i, r_j)
-            # Merge if centers are within 1x the larger radius of each other
-            # (very aggressive — catches any overlapping pair on the same fruit)
-            if dist < max_r * 1.2:
+            # FIX 2: Widened from 1.2 → 2.0 to catch far-apart split halves
+            if dist < max_r * 2.0:
                 union(i, j)
 
     groups = {}
@@ -349,18 +347,52 @@ def _dedup_contours(feats, cnts):
         kept_feats.append(feats[best_idx])
         kept_cnts.append(cnts[best_idx])
 
+    # ── FIX 3: Secondary overlap pass ─────────────────────────────────────
+    # Recompute centers after first-pass dedup
+    if len(kept_cnts) > 1:
+        centers = []
+        for cnt in kept_cnts:
+            (cx, cy), r = cv2.minEnclosingCircle(cnt)
+            centers.append((cx, cy, r))
+
+        dominated = set()
+        for i in range(len(centers)):
+            if i in dominated:
+                continue
+            for j in range(i + 1, len(centers)):
+                if j in dominated:
+                    continue
+                cx_i, cy_i, r_i = centers[i]
+                cx_j, cy_j, r_j = centers[j]
+                dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
+                # If circles overlap by more than 70%, drop the smaller one
+                if dist < (r_i + r_j) * 0.70:
+                    area_i = cv2.contourArea(kept_cnts[i])
+                    area_j = cv2.contourArea(kept_cnts[j])
+                    if area_i >= area_j:
+                        dominated.add(j)
+                    else:
+                        dominated.add(i)
+
+        kept_feats = [f for i, f in enumerate(kept_feats) if i not in dominated]
+        kept_cnts  = [c for i, c in enumerate(kept_cnts)  if i not in dominated]
+    # ──────────────────────────────────────────────────────────────────────
+
     return kept_feats, kept_cnts
 
 
 def get_fruit_features(img_blur, mask, hsv, ppc):
     """
     Watershed segmentation with high threshold + aggressive post-dedup.
+
+    FIX 1: Raised watershed seed threshold from 0.72 → 0.85 so a single
+    large fruit only gets ONE seed instead of being split into many.
     """
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # High threshold: one seed per fruit, not per fragment
-    _, sure_fg = cv2.threshold(dist_norm, 0.72 * dist_norm.max(), 255, 0)
+    # FIX 1: Higher threshold → fewer seeds → no false splits on close-up fruits
+    _, sure_fg = cv2.threshold(dist_norm, 0.85 * dist_norm.max(), 255, 0)
     sure_fg    = np.uint8(sure_fg)
     sure_bg    = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
     unknown    = cv2.subtract(sure_bg, sure_fg)
@@ -544,6 +576,9 @@ def process_video_frames(frames_rgb):
     2. Picks best frame (most fruits visible)
     3. Detects each individual calamansi using watershed + aggressive dedup
     4. Returns features per fruit for juice prediction
+
+    FIX 4: After feature extraction, sanity-checks the count against
+    the total mask area to prevent impossible over-counts at close range.
     """
     best_frame = None
     best_count = 0
@@ -576,6 +611,22 @@ def process_video_frames(frames_rgb):
     ppc = calibrate_ppc(circles, scale=scale)
     basket_contour, _        = detect_basket(img_blur)
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
+
+    # ── FIX 4: Sanity-check count against mask area ────────────────────────
+    if all_features:
+        total_mask_area = float(np.sum(mask > 0))
+        avg_fruit_area  = float(np.mean([f['area_cm2'] for f in all_features]))
+        ppc_sq          = ppc ** 2
+        # Each fruit occupies at least 60% of its expected pixel area
+        max_possible = max(1, int(total_mask_area / (avg_fruit_area * ppc_sq * 0.6)) + 1)
+
+        if len(all_features) > max_possible:
+            # Too many detections — keep only the largest by area
+            paired       = sorted(zip(all_features, valid_cnts),
+                                  key=lambda x: x[0]['area_cm2'], reverse=True)
+            all_features = [p[0] for p in paired[:max_possible]]
+            valid_cnts   = [p[1] for p in paired[:max_possible]]
+    # ──────────────────────────────────────────────────────────────────────
 
     return {
         'features':       all_features,
