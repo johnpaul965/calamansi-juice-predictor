@@ -468,35 +468,46 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     if not raw_cnts:
         return [], []
 
-    # ── 2. Drop shadow/highlight blobs ───────────────────────────────────
-    # Real fruit is the darkest blob; shadows are lighter.
+    # ── 2. Score each blob by fruit color (green HSV) vs shadow (blue) ──
     blob_info = []
     for cnt in raw_cnts:
         tmp = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(tmp, [cnt], -1, 255, -1)
-        mean_bright = float(np.mean(gray[tmp > 0]))
+        px_gray = gray[tmp > 0]
+        px_hsv  = hsv[tmp > 0]
+        if len(px_gray) == 0:
+            continue
+        mean_bright = float(np.mean(px_gray))
         area        = cv2.contourArea(cnt)
         (cx, cy), r = cv2.minEnclosingCircle(cnt)
-        blob_info.append({'cnt': cnt, 'area': area,
-                          'bright': mean_bright,
-                          'cx': cx, 'cy': cy, 'r': r})
+        mean_hue    = float(np.mean(px_hsv[:, 0]))
+        mean_sat    = float(np.mean(px_hsv[:, 1]))
+        # Fruit = green hue (H 20-105), reasonably saturated
+        hue_ok      = 1.0 if 20 <= mean_hue <= 105 else 0.0
+        sat_score   = float(np.clip(mean_sat / 80.0, 0.0, 1.0))
+        fruit_score = hue_ok * 0.6 + sat_score * 0.4
+        blob_info.append({'cnt': cnt, 'area': area, 'bright': mean_bright,
+                          'cx': cx, 'cy': cy, 'r': r,
+                          'fruit_score': fruit_score,
+                          'mean_hue': mean_hue, 'mean_sat': mean_sat})
 
     if not blob_info:
         return [], []
 
-    # The darkest blob brightness = the fruit signal
-    min_bright  = min(b['bright'] for b in blob_info)
-    max_area    = max(b['area']   for b in blob_info)
+    max_area        = max(b['area']        for b in blob_info)
+    max_fruit_score = max(b['fruit_score'] for b in blob_info)
 
-    # Keep a blob if it is:
-    #   - large (>= 25% of biggest blob), OR
-    #   - not much brighter than the darkest blob (within 40 gray levels)
-    keep = [b for b in blob_info
-            if b['area'] >= max_area * 0.25
-            or b['bright'] <= min_bright + 40]
+    keep = []
+    for b in blob_info:
+        is_largest     = b['area'] >= max_area * 0.80
+        good_color     = b['fruit_score'] >= max(0.3, max_fruit_score * 0.50)
+        is_large       = b['area'] >= max_area * 0.25
+        is_blue_shadow = b['mean_hue'] > 105 or b['mean_sat'] < 20
+        if is_largest or good_color or (is_large and not is_blue_shadow):
+            keep.append(b)
 
     if not keep:
-        keep = blob_info   # safety fallback
+        keep = [max(blob_info, key=lambda b: b['area'])]
 
     # ── 3. Merge nearby blobs (same fruit, fragmented) ────────────────────
     parent = list(range(len(keep)))
@@ -515,8 +526,8 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
             bi, bj  = keep[i], keep[j]
             dist    = np.sqrt((bi['cx'] - bj['cx'])**2 + (bi['cy'] - bj['cy'])**2)
             max_r   = max(bi['r'], bj['r'])
-            # Merge if centers are within 2× the larger radius
-            if dist < max_r * 2.0:
+            # Merge if centers are within 2.5× the larger radius
+            if dist < max_r * 2.5:
                 union(i, j)
 
     groups = {}
@@ -567,7 +578,7 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
                 cx_j, cy_j, r_j = circles_info[j]
                 dist = np.sqrt((cx_i - cx_j)**2 + (cy_i - cy_j)**2)
                 # If overlap > 40 %, drop the smaller
-                if dist < (r_i + r_j) * 0.60:
+                if dist < (r_i + r_j) * 0.70:
                     area_i = cv2.contourArea(result_cnts[i])
                     area_j = cv2.contourArea(result_cnts[j])
                     dominated.add(j if area_i >= area_j else i)
