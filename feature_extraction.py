@@ -8,8 +8,10 @@ import numpy as np
 
 PIXELS_PER_CM   = 41.0
 MIN_CIRCULARITY = 0.40
+# FIX: raised MAX_DIAMETER_CM 4.5→7.0 so close-range fruits
+# are not rejected as "too big" due to perspective distortion
 MIN_DIAMETER_CM = 1.5
-MAX_DIAMETER_CM = 4.5
+MAX_DIAMETER_CM = 7.0
 
 FEATURE_COLS = [
     'area_cm2', 'diameter_cm', 'perimeter_cm', 'circularity',
@@ -18,12 +20,9 @@ FEATURE_COLS = [
 
 # ─────────────────────────────────────────
 # HSV COLOR RANGES FOR CALAMANSI
-# Tightened to exclude dark wood/shelf backgrounds.
 # ─────────────────────────────────────────
-# Green calamansi (unripe)
 HSV_GREEN_LO = np.array([28, 45, 35])
 HSV_GREEN_HI = np.array([88, 255, 210])
-# Yellow-orange calamansi (ripe)
 HSV_RIPE_LO  = np.array([12, 50, 50])
 HSV_RIPE_HI  = np.array([38, 255, 255])
 
@@ -34,13 +33,10 @@ MIN_OVERLAP  = 0.50
 
 # ─────────────────────────────────────────
 # SCENE VALIDATION THRESHOLDS
-# A valid scan: plain light background, fruit
-# mask covers only a modest portion of frame.
 # ─────────────────────────────────────────
-MAX_FRUIT_COVERAGE = 0.40   # >40% masked = background noise, not fruit
-MIN_BG_MEAN        = 100    # background must be reasonably bright (light surface)
-MAX_BG_STD         = 55     # background must be plain (low variance)
-                            # cluttered rooms/desks have high std
+MAX_FRUIT_COVERAGE = 0.40
+MIN_BG_MEAN        = 100
+MAX_BG_STD         = 55
 
 
 def _square_crop(image_array):
@@ -62,7 +58,7 @@ def preprocess_image(image_path):
 
 def preprocess_array(image_array):
     cropped = _square_crop(image_array)
-    # Trim 10% from left edge to remove shelf/background bleed-in on the left.
+    # Trim 10% from left edge to remove shelf/background bleed-in.
     # Remove this line if your camera framing no longer shows the shelf.
     h, w = cropped.shape[:2]
     cropped = cropped[:, int(w * 0.10):]
@@ -71,7 +67,29 @@ def preprocess_array(image_array):
         (5, 5), 0)
 
 
-def segment_fruit(img_blur):
+def _estimate_distance_scale(img_blur, mask):
+    """
+    Estimate a scale factor based on how large the fruit blobs appear.
+    Returns a float:
+      > 1.0  → camera is close  (fruits appear large)
+      = 1.0  → camera at ideal distance (~10-12 inches)
+      < 1.0  → camera is far   (fruits appear small)
+
+    Uses the median contour area of mask blobs as a proxy for distance.
+    Baseline: a 2.5cm calamansi at 41px/cm → area ≈ π*(51.25)² ≈ 8253 px²
+    """
+    baseline_area = np.pi * (PIXELS_PER_CM * 1.25) ** 2  # ideal radius in px
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    areas = [cv2.contourArea(c) for c in cnts if cv2.contourArea(c) > 200]
+    if not areas:
+        return 1.0
+    median_area = float(np.median(areas))
+    scale = np.sqrt(median_area / baseline_area)
+    # Clamp to a reasonable range so we don't go crazy
+    return float(np.clip(scale, 0.4, 3.5))
+
+
+def segment_fruit(img_blur, scale=1.0):
     hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
     mask1 = cv2.inRange(hsv, HSV_GREEN_LO, HSV_GREEN_HI)
     mask2 = cv2.inRange(hsv, HSV_RIPE_LO,  HSV_RIPE_HI)
@@ -80,12 +98,15 @@ def segment_fruit(img_blur):
     mask  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
 
-    # Remove blobs too large to be individual fruits.
-    # Shelves/tables register as one giant connected blob.
+    # FIX: scale the maximum blob size by the distance scale factor.
+    # At close range scale>1 so the ceiling rises — close-range fruits
+    # are no longer incorrectly erased as "background blobs".
+    # was: max_fruit_area_px * 3 (fixed) → now: * 3 * scale²
     max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
+    size_ceiling      = max_fruit_area_px * 3 * (scale ** 2)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in cnts:
-        if cv2.contourArea(cnt) > max_fruit_area_px * 3:
+        if cv2.contourArea(cnt) > size_ceiling:
             cv2.drawContours(mask, [cnt], -1, 0, -1)
 
     return mask, hsv
@@ -94,37 +115,22 @@ def segment_fruit(img_blur):
 def _is_valid_scan_scene(img_blur, mask):
     """
     Reject frames that don't look like a proper fruit scan.
-
-    A valid scan has:
-      - Fruit mask covering only a small-to-moderate portion of frame
-        (not flooding 40%+ which means background noise was segmented)
-      - A mostly plain, bright background (white paper / table surface)
-        with low pixel variance — cluttered rooms score high std
-
-    Returns True only if the scene passes all checks.
+    Checks coverage, background brightness, and background variance.
     """
     H, W     = img_blur.shape[:2]
     total_px = H * W
     fruit_px = int(np.sum(mask > 0))
 
-    # Check 1: mask coverage
-    # If fruit mask floods more than 40% of the frame it's almost
-    # certainly background objects being misidentified, not real fruit.
-    coverage = fruit_px / total_px
-    if coverage > MAX_FRUIT_COVERAGE:
+    if fruit_px / total_px > MAX_FRUIT_COVERAGE:
         return False
 
-    # Check 2: background must be plain and bright
-    # Analyse the pixels NOT covered by the fruit mask.
-    bg_mask  = cv2.bitwise_not(mask)
-    gray     = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    bg_mask   = cv2.bitwise_not(mask)
+    gray      = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     bg_pixels = gray[bg_mask > 0]
 
     if len(bg_pixels) > 0:
         bg_mean = float(np.mean(bg_pixels))
         bg_std  = float(np.std(bg_pixels))
-
-        # Dark or cluttered background (desk, room, cat, cables …)
         if bg_mean < MIN_BG_MEAN:
             return False
         if bg_std > MAX_BG_STD:
@@ -230,8 +236,6 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # Raised threshold 0.4→0.55 to prevent watershed splitting
-    # a single touching fruit into two separate regions
     _, sure_fg = cv2.threshold(dist_norm, 0.55 * dist_norm.max(), 255, 0)
 
     sure_fg    = np.uint8(sure_fg)
@@ -280,10 +284,14 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     return feats, cnts
 
 
-def calibrate_ppc(hough_circles):
-    """Estimate pixels/cm from visible fruit size (avg calamansi diameter = 2.5cm)."""
+def calibrate_ppc(hough_circles, scale=1.0):
+    """
+    Estimate pixels/cm from visible fruit size.
+    FIX: now also accepts scale factor from distance estimation
+    so ppc is adjusted for close/far shots.
+    """
     if not hough_circles:
-        return PIXELS_PER_CM
+        return PIXELS_PER_CM * scale
     avg_r_px = np.mean([r for _, _, r in hough_circles])
     return max(avg_r_px / 1.25, 5.0)
 
@@ -335,9 +343,11 @@ def get_features_from_hough(img_blur, circles, ppc):
     return feats, cnts
 
 
-def count_hough(img_blur, mask):
+def count_hough(img_blur, mask, scale=1.0):
     """
     Hough circle detection with strict false-positive prevention.
+    FIX: minRadius, maxRadius, and minDist now scale with distance
+    so close-range and far-range fruits are both detectable.
     """
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
@@ -349,29 +359,35 @@ def count_hough(img_blur, mask):
     if coverage < MIN_COVERAGE:
         return []
 
-    # Guard 2: Average saturation of masked region must be high enough
+    # Guard 2: Average saturation of masked region
     if fruit_px > 0:
         avg_sat = np.mean(hsv[:, :, 1][mask > 0])
         if avg_sat < MIN_AVG_SAT:
             return []
 
-    # Guard 3: Scene must look like a proper fruit scan setup.
-    # Rejects cluttered rooms, desks, pets, cables, etc.
+    # Guard 3: Scene must look like a proper fruit scan setup
     if not _is_valid_scan_scene(img_blur, mask):
         return []
 
     mean_v = float(gray.mean())
     bright_thresh = min(155, int(mean_v + 10))
 
+    # FIX: scale Hough parameters by distance scale factor
+    # At close range (scale>1): larger min/max radius, larger minDist
+    # At far range  (scale<1): smaller min/max radius, smaller minDist
+    min_r  = max(5,  int(8  * scale))   # was hardcoded 8
+    max_r  = min(150, int(80 * scale))  # was hardcoded 42 → now 80*scale
+    min_d  = max(15, int(40 * scale))   # was hardcoded 45
+
     circles = cv2.HoughCircles(
         gray,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
-        minDist=45,
+        minDist=min_d,
         param1=45,
         param2=22,
-        minRadius=8,
-        maxRadius=42
+        minRadius=min_r,
+        maxRadius=max_r,
     )
     if circles is None:
         return []
@@ -430,12 +446,12 @@ def extract_features_from_path(image_path):
 def process_video_frames(frames_rgb):
     """
     Main pipeline for basket video.
-    1. Picks best frame (most fruits visible)
-    2. Detects each individual calamansi using watershed
-    3. Returns features per fruit for juice prediction
+    1. Estimates distance scale from blob sizes
+    2. Picks best frame (most fruits visible)
+    3. Detects each individual calamansi using watershed
+    4. Returns features per fruit for juice prediction
 
-    Returns None if no valid scan scene is found across all frames.
-    The caller (Streamlit app) should check for None and show a warning:
+    Caller should handle None return with a user warning:
 
         result = process_video_frames(frames)
         if result is None or result['fruit_count'] == 0:
@@ -451,9 +467,13 @@ def process_video_frames(frames_rgb):
     best_count = 0
 
     for frame_rgb in frames_rgb:
-        img_blur  = preprocess_array(frame_rgb)
-        mask, hsv = segment_fruit(img_blur)
-        circles   = count_hough(img_blur, mask)  # returns [] if scene invalid
+        img_blur       = preprocess_array(frame_rgb)
+        # FIX: estimate distance scale FIRST from raw mask
+        raw_mask, _    = segment_fruit(img_blur, scale=1.0)
+        scale          = _estimate_distance_scale(img_blur, raw_mask)
+        # Re-segment with correct scale so blob ceiling is right
+        mask, hsv      = segment_fruit(img_blur, scale=scale)
+        circles        = count_hough(img_blur, mask, scale=scale)
         if len(circles) > best_count:
             best_count = len(circles)
             best_frame = {
@@ -461,6 +481,7 @@ def process_video_frames(frames_rgb):
                 'mask':     mask,
                 'hsv':      hsv,
                 'circles':  circles,
+                'scale':    scale,
             }
 
     if best_frame is None:
@@ -470,8 +491,9 @@ def process_video_frames(frames_rgb):
     mask     = best_frame['mask']
     hsv      = best_frame['hsv']
     circles  = best_frame['circles']
+    scale    = best_frame['scale']
 
-    ppc = calibrate_ppc(circles)
+    ppc = calibrate_ppc(circles, scale=scale)
     basket_contour, _ = detect_basket(img_blur)
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
@@ -480,6 +502,7 @@ def process_video_frames(frames_rgb):
         'contours':       valid_cnts,
         'img_blur':       img_blur,
         'ppc':            ppc,
+        'scale':          scale,
         'basket_contour': basket_contour,
         'hough_circles':  circles,
         'fruit_count':    len(all_features),
