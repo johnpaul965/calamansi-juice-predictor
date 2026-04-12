@@ -77,9 +77,20 @@ def _brightness_contrast_mask(img_blur):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
-    # Shadow suppression
-    mask = cv2.erode(mask,  np.ones((7, 7), np.uint8), iterations=2)
-    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
+    # Shadow suppression — stronger erode to kill faint shadow blobs
+    mask = cv2.erode(mask,  np.ones((11, 11), np.uint8), iterations=2)
+    mask = cv2.dilate(mask, np.ones((7,  7),  np.uint8), iterations=2)
+
+    # Extra: remove any blob whose mean brightness is too high (shadows are lighter)
+    cnts_s, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    gray_s = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    for cnt_s in cnts_s:
+        tmp = np.zeros_like(mask)
+        cv2.drawContours(tmp, [cnt_s], -1, 255, -1)
+        mean_bright = float(np.mean(gray_s[tmp > 0]))
+        # If the blob is brighter than 100, it's a shadow/highlight, not fruit
+        if mean_bright > 100:
+            cv2.drawContours(mask, [cnt_s], -1, 0, -1)
 
     return mask
 
@@ -331,8 +342,8 @@ def _dedup_contours(feats, cnts):
             cx_j, cy_j, r_j, _ = info[j]
             dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
             max_r = max(r_i, r_j)
-            # FIX 2: Widened from 1.2 → 2.0 to catch far-apart split halves
-            if dist < max_r * 2.0:
+            # FIX 2: Widened to 3.0x — catches shadow blobs adjacent to fruit
+            if dist < max_r * 3.0:
                 union(i, j)
 
     groups = {}
@@ -365,8 +376,8 @@ def _dedup_contours(feats, cnts):
                 cx_i, cy_i, r_i = centers[i]
                 cx_j, cy_j, r_j = centers[j]
                 dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
-                # If circles overlap by more than 70%, drop the smaller one
-                if dist < (r_i + r_j) * 0.70:
+                # If circles overlap by more than 50%, drop the smaller one
+                if dist < (r_i + r_j) * 0.50:
                     area_i = cv2.contourArea(kept_cnts[i])
                     area_j = cv2.contourArea(kept_cnts[j])
                     if area_i >= area_j:
@@ -377,6 +388,26 @@ def _dedup_contours(feats, cnts):
         kept_feats = [f for i, f in enumerate(kept_feats) if i not in dominated]
         kept_cnts  = [c for i, c in enumerate(kept_cnts)  if i not in dominated]
     # ──────────────────────────────────────────────────────────────────────
+
+    # ── FINAL CAP: if all kept contours cluster within 1 fruit-width, keep only largest ──
+    if len(kept_cnts) > 1:
+        centers2 = []
+        for cnt in kept_cnts:
+            (cx, cy), r = cv2.minEnclosingCircle(cnt)
+            centers2.append((cx, cy, r))
+
+        # Find bounding box of all centers
+        xs = [c[0] for c in centers2]
+        ys = [c[1] for c in centers2]
+        spread = np.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
+        max_r_all = max(c[2] for c in centers2)
+
+        # If all centers fit within 2x the largest radius → single fruit, keep largest
+        if spread < max_r_all * 2.0:
+            best_i = max(range(len(kept_cnts)), key=lambda i: cv2.contourArea(kept_cnts[i]))
+            kept_feats = [kept_feats[best_i]]
+            kept_cnts  = [kept_cnts[best_i]]
+    # ───────────────────────────────────────────────────────────────────────────────────
 
     return kept_feats, kept_cnts
 
