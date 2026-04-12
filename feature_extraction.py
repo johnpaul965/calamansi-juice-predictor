@@ -446,80 +446,136 @@ def _dedup_contours(feats, cnts):
 
 def get_fruit_features(img_blur, mask, hsv, ppc):
     """
-    Watershed segmentation with high threshold + aggressive post-dedup.
+    Detects individual calamansi fruits from the segmentation mask.
 
-    FIX 1: Raised watershed seed threshold from 0.72 → 0.85 so a single
-    large fruit only gets ONE seed instead of being split into many.
-
-    FAST PATH: If the mask has only ONE connected blob, skip watershed
-    entirely and return that blob directly — avoids all false splits.
+    Strategy (in order):
+      1. Find all external contours in the mask.
+      2. Remove shadow/highlight blobs: keep only the darkest blobs.
+         (shadows cast by a fruit are lighter than the fruit itself)
+      3. Merge any remaining blobs that are within 1 fruit-radius of
+         each other — they are fragments of the same fruit.
+      4. For each surviving blob, compute features directly from the
+         largest contour.  NO watershed — watershed is the source of
+         all false splits.
+      5. Final NMS: if two result circles overlap by > 40%, drop the
+         smaller one.
     """
-    # ── FAST PATH: single blob → guaranteed 1 fruit ───────────────────────
-    raw_cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    valid_blobs = [c for c in raw_cnts if cv2.contourArea(c) > 200]
+    gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
 
-    if len(valid_blobs) == 1:
-        cnt = valid_blobs[0]
+    # ── 1. Raw blobs ──────────────────────────────────────────────────────
+    raw_cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    raw_cnts = [c for c in raw_cnts if cv2.contourArea(c) > 100]
+    if not raw_cnts:
+        return [], []
+
+    # ── 2. Drop shadow/highlight blobs ───────────────────────────────────
+    # Real fruit is the darkest blob; shadows are lighter.
+    blob_info = []
+    for cnt in raw_cnts:
+        tmp = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.drawContours(tmp, [cnt], -1, 255, -1)
+        mean_bright = float(np.mean(gray[tmp > 0]))
+        area        = cv2.contourArea(cnt)
+        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+        blob_info.append({'cnt': cnt, 'area': area,
+                          'bright': mean_bright,
+                          'cx': cx, 'cy': cy, 'r': r})
+
+    if not blob_info:
+        return [], []
+
+    # The darkest blob brightness = the fruit signal
+    min_bright  = min(b['bright'] for b in blob_info)
+    max_area    = max(b['area']   for b in blob_info)
+
+    # Keep a blob if it is:
+    #   - large (>= 25% of biggest blob), OR
+    #   - not much brighter than the darkest blob (within 40 gray levels)
+    keep = [b for b in blob_info
+            if b['area'] >= max_area * 0.25
+            or b['bright'] <= min_bright + 40]
+
+    if not keep:
+        keep = blob_info   # safety fallback
+
+    # ── 3. Merge nearby blobs (same fruit, fragmented) ────────────────────
+    parent = list(range(len(keep)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    for i in range(len(keep)):
+        for j in range(i + 1, len(keep)):
+            bi, bj  = keep[i], keep[j]
+            dist    = np.sqrt((bi['cx'] - bj['cx'])**2 + (bi['cy'] - bj['cy'])**2)
+            max_r   = max(bi['r'], bj['r'])
+            # Merge if centers are within 2× the larger radius
+            if dist < max_r * 2.0:
+                union(i, j)
+
+    groups = {}
+    for i in range(len(keep)):
+        g = find(i)
+        groups.setdefault(g, []).append(i)
+
+    # ── 4. One result per group ───────────────────────────────────────────
+    feats, result_cnts = [], []
+    for g, idxs in groups.items():
+        # Within a group keep the largest-area blob
+        best = max(idxs, key=lambda i: keep[i]['area'])
+        cnt  = keep[best]['cnt']
+
+        if not is_calamansi(cnt, ppc):
+            # Try the merged convex hull of the whole group
+            all_pts = np.vstack([keep[i]['cnt'] for i in idxs])
+            hull    = cv2.convexHull(all_pts)
+            if not is_calamansi(hull, ppc):
+                continue
+            cnt = hull
+
         single = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(single, [cnt], -1, 255, -1)
-        if is_calamansi(cnt, ppc) and _has_fruit_color(hsv, single):
-            f = compute_features(cnt, mask, hsv, ppc)
-            if f:
-                return [f], [cnt]
-    # ──────────────────────────────────────────────────────────────────────
+        if not _has_fruit_color(hsv, single):
+            continue
 
-    dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-    # FIX 1: Higher threshold → fewer seeds → no false splits on close-up fruits
-    _, sure_fg = cv2.threshold(dist_norm, 0.85 * dist_norm.max(), 255, 0)
-    sure_fg    = np.uint8(sure_fg)
-    sure_bg    = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
-    unknown    = cv2.subtract(sure_bg, sure_fg)
-    _, markers = cv2.connectedComponents(sure_fg)
-    markers    = markers + 1
-    markers[unknown == 255] = 0
-    markers    = cv2.watershed(cv2.cvtColor(img_blur, cv2.COLOR_RGB2BGR), markers)
-
-    feats, cnts = [], []
-    for label in np.unique(markers):
-        if label <= 1:
-            continue
-        seg = np.zeros(mask.shape, dtype=np.uint8)
-        seg[markers == label] = 255
-        seg = cv2.bitwise_and(seg, mask)
-        cs, _ = cv2.findContours(seg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cs:
-            continue
-        cnt = max(cs, key=cv2.contourArea)
-        if not is_calamansi(cnt, ppc):
-            continue
-        if not _has_fruit_color(hsv, seg):
-            continue
         f = compute_features(cnt, mask, hsv, ppc)
         if f:
             feats.append(f)
-            cnts.append(cnt)
+            result_cnts.append(cnt)
 
-    # Fallback: direct contour detection
-    if not feats:
-        cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cs:
-            if not is_calamansi(cnt, ppc):
+    # ── 5. Final NMS on result circles ────────────────────────────────────
+    if len(result_cnts) > 1:
+        circles_info = []
+        for cnt in result_cnts:
+            (cx, cy), r = cv2.minEnclosingCircle(cnt)
+            circles_info.append((cx, cy, r))
+
+        dominated = set()
+        for i in range(len(circles_info)):
+            if i in dominated:
                 continue
-            single = np.zeros(mask.shape, dtype=np.uint8)
-            cv2.drawContours(single, [cnt], -1, 255, -1)
-            if not _has_fruit_color(hsv, single):
-                continue
-            f = compute_features(cnt, mask, hsv, ppc)
-            if f:
-                feats.append(f)
-                cnts.append(cnt)
+            for j in range(i + 1, len(circles_info)):
+                if j in dominated:
+                    continue
+                cx_i, cy_i, r_i = circles_info[i]
+                cx_j, cy_j, r_j = circles_info[j]
+                dist = np.sqrt((cx_i - cx_j)**2 + (cy_i - cy_j)**2)
+                # If overlap > 40 %, drop the smaller
+                if dist < (r_i + r_j) * 0.60:
+                    area_i = cv2.contourArea(result_cnts[i])
+                    area_j = cv2.contourArea(result_cnts[j])
+                    dominated.add(j if area_i >= area_j else i)
 
-    # Aggressive dedup — merges any contours on the same fruit
-    feats, cnts = _dedup_contours(feats, cnts)
+        feats       = [f for i, f in enumerate(feats)       if i not in dominated]
+        result_cnts = [c for i, c in enumerate(result_cnts) if i not in dominated]
 
-    return feats, cnts
+    return feats, result_cnts
 
 
 def calibrate_ppc(hough_circles, scale=1.0):
