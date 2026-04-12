@@ -16,14 +16,7 @@ FEATURE_COLS = [
     'estimated_volume_cm3', 'mean_hue', 'mean_saturation', 'mean_value'
 ]
 
-# ─────────────────────────────────────────
-# HSV COLOR RANGES FOR CALAMANSI
-# Note: under certain lighting/backgrounds
-# the fruit hue shifts toward cyan (H~100).
-# The brightness-contrast fallback handles
-# these cases automatically.
-# ─────────────────────────────────────────
-HSV_GREEN_LO = np.array([25, 30, 15])   # wide — catches shifted hues
+HSV_GREEN_LO = np.array([25, 30, 15])
 HSV_GREEN_HI = np.array([100, 255, 210])
 HSV_RIPE_LO  = np.array([10, 35, 35])
 HSV_RIPE_HI  = np.array([40, 255, 255])
@@ -31,11 +24,8 @@ HSV_RIPE_HI  = np.array([40, 255, 255])
 MIN_AVG_SAT  = 25
 MIN_SAT_VAL  = 25
 MIN_COVERAGE = 0.003
-MIN_OVERLAP  = 0.50   # FIX: raised from 0.35 to reduce spurious mask matches
+MIN_OVERLAP  = 0.50
 
-# ─────────────────────────────────────────
-# SCENE VALIDATION THRESHOLDS
-# ─────────────────────────────────────────
 MAX_FRUIT_COVERAGE = 0.55
 MIN_BG_MEAN        = 60
 MAX_BG_STD         = 75
@@ -60,8 +50,6 @@ def preprocess_image(image_path):
 
 def preprocess_array(image_array):
     cropped = _square_crop(image_array)
-    # Trim 10% from left edge to remove shelf/background bleed-in.
-    # Remove this line if your camera framing no longer shows the shelf.
     h, w = cropped.shape[:2]
     cropped = cropped[:, int(w * 0.10):]
     return cv2.GaussianBlur(
@@ -71,53 +59,32 @@ def preprocess_array(image_array):
 
 def _brightness_contrast_mask(img_blur):
     """
-    Fallback segmentation using brightness contrast only.
-
-    When the background is uniform and bright (white, blue, grey paper),
-    the fruit appears as a distinctly DARKER blob. This detector finds
-    pixels that are significantly darker than the background median,
-    regardless of their color/hue.
-
-    This handles cases where camera white-balance shifts the fruit hue
-    outside the expected green range (e.g. H=103 cyan on blue surface).
-
-    Returns a binary mask of dark blobs, or None if background is not
-    uniform enough to use this method safely.
+    Fallback segmentation using brightness contrast.
+    Large closing kernel bridges notebook-line gaps.
     """
     gray    = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     bg_mean = float(np.mean(gray))
     bg_std  = float(np.std(gray))
 
-    # Only use this method when background is bright AND uniform
-    # (avoids false positives on cluttered dark backgrounds)
     if bg_mean < 100 or bg_std > 60:
         return None
 
-    # Threshold: pixels more than 1.5 std below the mean are "dark objects"
     dark_thresh = max(0, int(bg_mean - max(bg_std * 1.5, 25)))
     _, mask = cv2.threshold(gray, dark_thresh, 255, cv2.THRESH_BINARY_INV)
 
-    k    = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+    k_close = np.ones((15, 15), np.uint8)
+    k_open  = np.ones((5,  5),  np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
-    # FIX: Suppress shadows — erode aggressively to remove thin shadow blobs
-    # Shadows tend to be large, irregular, low-saturation regions.
-    # We shrink the mask so only compact (fruit-like) blobs survive.
-    mask = cv2.erode(mask, np.ones((7, 7), np.uint8), iterations=2)
+    # Shadow suppression
+    mask = cv2.erode(mask,  np.ones((7, 7), np.uint8), iterations=2)
     mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
 
     return mask
 
 
 def _estimate_distance_scale(img_blur, mask):
-    """
-    Estimate a scale factor based on how large the fruit blobs appear.
-    Returns:
-      > 1.0  → camera is close  (fruits appear large)
-      = 1.0  → camera at ideal distance (~10-12 inches)
-      < 1.0  → camera is far   (fruits appear small)
-    """
     baseline_area = np.pi * (PIXELS_PER_CM * 1.25) ** 2
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     areas   = [cv2.contourArea(c) for c in cnts if cv2.contourArea(c) > 200]
@@ -128,13 +95,55 @@ def _estimate_distance_scale(img_blur, mask):
     return float(np.clip(scale, 0.4, 3.5))
 
 
+def _merge_overlapping_mask_blobs(mask):
+    """
+    Groups nearby mask fragments (caused by notebook lines or shadows)
+    and redraws them as single convex-hull blobs.
+    PROXIMITY controls how far apart two fragments can be and still merge.
+    """
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(cnts) <= 1:
+        return mask
+
+    rects  = [cv2.boundingRect(c) for c in cnts]
+    parent = list(range(len(rects)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    # Increased proximity: merge blobs up to 30px apart
+    PROXIMITY = 30
+
+    for i in range(len(rects)):
+        xi, yi, wi, hi = rects[i]
+        for j in range(i + 1, len(rects)):
+            xj, yj, wj, hj = rects[j]
+            gap_x = max(0, max(xi, xj) - min(xi + wi, xj + wj))
+            gap_y = max(0, max(yi, yj) - min(yi + hi, yj + hj))
+            if gap_x <= PROXIMITY and gap_y <= PROXIMITY:
+                union(i, j)
+
+    merged = np.zeros_like(mask)
+    groups = {}
+    for i, cnt in enumerate(cnts):
+        g = find(i)
+        groups.setdefault(g, []).append(cnt)
+
+    for g, group_cnts in groups.items():
+        all_pts = np.vstack(group_cnts)
+        hull    = cv2.convexHull(all_pts)
+        cv2.fillPoly(merged, [hull], 255)
+
+    return merged
+
+
 def segment_fruit(img_blur, scale=1.0):
-    """
-    Two-stage segmentation:
-    1. HSV color mask (primary — works on white background)
-    2. Brightness-contrast mask (fallback — works on any uniform background)
-    The union of both masks is returned.
-    """
     hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
     mask1 = cv2.inRange(hsv, HSV_GREEN_LO, HSV_GREEN_HI)
     mask2 = cv2.inRange(hsv, HSV_RIPE_LO,  HSV_RIPE_HI)
@@ -143,15 +152,15 @@ def segment_fruit(img_blur, scale=1.0):
     hsv_mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_CLOSE, k)
     hsv_mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_OPEN,  k)
 
-    # Brightness-contrast fallback
     bc_mask = _brightness_contrast_mask(img_blur)
     if bc_mask is not None:
-        # Union: accept pixels detected by EITHER method
         mask = cv2.bitwise_or(hsv_mask, bc_mask)
     else:
         mask = hsv_mask
 
-    # Remove blobs too large to be fruits, scaled by distance
+    # Merge nearby fragments before watershed
+    mask = _merge_overlapping_mask_blobs(mask)
+
     max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
     size_ceiling      = max_fruit_area_px * 3 * (scale ** 2)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -163,11 +172,6 @@ def segment_fruit(img_blur, scale=1.0):
 
 
 def _is_valid_scan_scene(img_blur, mask):
-    """
-    Reject frames that don't look like a proper fruit scan.
-    Accepts white, blue, grey, and light coloured surfaces.
-    Rejects very dark cluttered rooms/desks.
-    """
     H, W     = img_blur.shape[:2]
     total_px = H * W
     fruit_px = int(np.sum(mask > 0))
@@ -191,7 +195,6 @@ def _is_valid_scan_scene(img_blur, mask):
 
 
 def detect_basket(img_blur):
-    """Detect basket/container boundary. Falls back to largest contour."""
     gray  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     H, W  = img_blur.shape[:2]
 
@@ -224,7 +227,6 @@ def detect_basket(img_blur):
 
 
 def is_calamansi(cnt, ppc):
-    """Strict shape + size check for a contour to be a calamansi."""
     area = cv2.contourArea(cnt)
     if area < 100:
         return False
@@ -240,20 +242,13 @@ def is_calamansi(cnt, ppc):
 
 
 def _has_fruit_color(hsv, mask_region):
-    """
-    Validate that a detected region has fruit-like properties.
-    Relaxed for camera white-balance shifted fruits (cyan hue on blue bg).
-    """
     px = hsv[mask_region > 0]
     if len(px) == 0:
         return False
     avg_sat = np.mean(px[:, 1])
     avg_val = np.mean(px[:, 2])
-
-    # Must have some saturation — pure grey/white background has S≈0
     if avg_sat < MIN_AVG_SAT:
         return False
-    # Reject pure white overexposure
     if avg_val > 240:
         return False
     return True
@@ -281,23 +276,16 @@ def compute_features(cnt, mask, hsv, ppc):
     }
 
 
-# ─────────────────────────────────────────
-# FIX: Non-Maximum Suppression for circles
-# Removes duplicate overlapping Hough circles
-# so one fruit = one detection.
-# ─────────────────────────────────────────
 def _nms_circles(circles, iou_thresh=0.5):
-    """Remove duplicate overlapping Hough circles (Non-Maximum Suppression)."""
+    """Non-Maximum Suppression for Hough circles."""
     if not circles:
         return []
-    # Sort by radius descending — prefer larger (more confident) detections
     circles = sorted(circles, key=lambda c: c[2], reverse=True)
     kept = []
     for cx, cy, cr in circles:
         duplicate = False
         for kx, ky, kr in kept:
             dist = np.sqrt((cx - kx) ** 2 + (cy - ky) ** 2)
-            # If centers are closer than iou_thresh * sum of radii → duplicate
             if dist < (cr + kr) * iou_thresh:
                 duplicate = True
                 break
@@ -306,47 +294,72 @@ def _nms_circles(circles, iou_thresh=0.5):
     return kept
 
 
-# ─────────────────────────────────────────
-# FIX: Deduplicate overlapping contours
-# Prevents watershed over-segmentation from
-# reporting 5 detections on a single fruit.
-# ─────────────────────────────────────────
-def _dedup_contours(feats, cnts, overlap_thresh=0.5):
-    """Remove contours whose enclosing circles overlap significantly."""
+def _dedup_contours(feats, cnts):
+    """
+    Aggressive deduplication of contours.
+
+    Two contours are considered the SAME fruit if either:
+      (a) their enclosing-circle centers are within 1 radius of each other, OR
+      (b) the smaller circle's center falls INSIDE the larger circle.
+
+    Only the contour with the largest area is kept per group.
+    This handles the fruit+shadow split seen in the screenshots.
+    """
     if len(cnts) <= 1:
         return feats, cnts
-    centers = []
+
+    # Build (cx, cy, r, area) for each contour
+    info = []
     for cnt in cnts:
-        (x, y), r = cv2.minEnclosingCircle(cnt)
-        centers.append((x, y, r))
-    keep = [True] * len(centers)
-    for i in range(len(centers)):
-        if not keep[i]:
-            continue
-        for j in range(i + 1, len(centers)):
-            if not keep[j]:
-                continue
-            xi, yi, ri = centers[i]
-            xj, yj, rj = centers[j]
-            dist = np.sqrt((xi - xj) ** 2 + (yi - yj) ** 2)
-            if dist < (ri + rj) * overlap_thresh:
-                # Drop the smaller contour
-                if ri >= rj:
-                    keep[j] = False
-                else:
-                    keep[i] = False
-    kept_feats = [f for f, k in zip(feats, keep) if k]
-    kept_cnts  = [c for c, k in zip(cnts,  keep) if k]
+        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+        area = cv2.contourArea(cnt)
+        info.append((cx, cy, r, area))
+
+    parent = list(range(len(cnts)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    for i in range(len(info)):
+        cx_i, cy_i, r_i, _ = info[i]
+        for j in range(i + 1, len(info)):
+            cx_j, cy_j, r_j, _ = info[j]
+            dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
+            max_r = max(r_i, r_j)
+            # Merge if centers are within 1x the larger radius of each other
+            # (very aggressive — catches any overlapping pair on the same fruit)
+            if dist < max_r * 1.2:
+                union(i, j)
+
+    groups = {}
+    for i in range(len(cnts)):
+        g = find(i)
+        groups.setdefault(g, []).append(i)
+
+    kept_feats, kept_cnts = [], []
+    for g, idxs in groups.items():
+        # Keep the one with the largest contour area
+        best_idx = max(idxs, key=lambda i: info[i][3])
+        kept_feats.append(feats[best_idx])
+        kept_cnts.append(cnts[best_idx])
+
     return kept_feats, kept_cnts
 
 
 def get_fruit_features(img_blur, mask, hsv, ppc):
-    """Watershed segmentation to get individual fruit features."""
+    """
+    Watershed segmentation with high threshold + aggressive post-dedup.
+    """
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # FIX: Raised threshold from 0.55 → 0.72 so a single fruit blob
-    # produces only ONE seed point instead of many, preventing over-splitting.
+    # High threshold: one seed per fruit, not per fragment
     _, sure_fg = cv2.threshold(dist_norm, 0.72 * dist_norm.max(), 255, 0)
     sure_fg    = np.uint8(sure_fg)
     sure_bg    = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
@@ -391,14 +404,13 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
                 feats.append(f)
                 cnts.append(cnt)
 
-    # FIX: Deduplicate overlapping contours (catches watershed over-splits)
-    feats, cnts = _dedup_contours(feats, cnts, overlap_thresh=0.5)
+    # Aggressive dedup — merges any contours on the same fruit
+    feats, cnts = _dedup_contours(feats, cnts)
 
     return feats, cnts
 
 
 def calibrate_ppc(hough_circles, scale=1.0):
-    """Estimate pixels/cm from visible fruit size."""
     if not hough_circles:
         return PIXELS_PER_CM * scale
     avg_r_px = np.mean([r for _, _, r in hough_circles])
@@ -406,7 +418,6 @@ def calibrate_ppc(hough_circles, scale=1.0):
 
 
 def get_features_from_hough(img_blur, circles, ppc):
-    """Extract features directly from Hough circles."""
     hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
     feats, cnts = [], []
 
@@ -449,28 +460,20 @@ def get_features_from_hough(img_blur, circles, ppc):
 
 
 def count_hough(img_blur, mask, scale=1.0):
-    """
-    Hough circle detection with strict false-positive prevention.
-    Parameters scale with distance so close/far shots both work.
-    Uses brightness-contrast mask when HSV mask is too sparse.
-    """
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
 
-    # Guard 1: Enough masked pixels?
     total_px = mask.shape[0] * mask.shape[1]
     fruit_px = np.sum(mask > 0)
     if fruit_px / total_px < MIN_COVERAGE:
         return []
 
-    # Guard 2: Scene must look like a proper fruit scan setup
     if not _is_valid_scan_scene(img_blur, mask):
         return []
 
     mean_v        = float(gray.mean())
-    bright_thresh = min(int(mean_v - 15), 200)  # fruits must be darker than bg
+    bright_thresh = min(int(mean_v - 15), 200)
 
-    # Scale Hough parameters by distance scale factor
     min_r = max(5,   int(8  * scale))
     max_r = min(150, int(80 * scale))
     min_d = max(15,  int(40 * scale))
@@ -480,8 +483,8 @@ def count_hough(img_blur, mask, scale=1.0):
         cv2.HOUGH_GRADIENT,
         dp=1.2,
         minDist=min_d,
-        param1=35,   # lowered for low-contrast dark fruits
-        param2=18,   # lowered to catch darker fruits on bright bg
+        param1=35,
+        param2=18,
         minRadius=min_r,
         maxRadius=max_r,
     )
@@ -496,12 +499,10 @@ def count_hough(img_blur, mask, scale=1.0):
         y1, y2 = max(0, y-3), min(gray.shape[0], y+4)
         x1, x2 = max(0, x-3), min(gray.shape[1], x+4)
 
-        # Center must be darker than background
         center_gray = float(np.mean(gray[y1:y2, x1:x2]))
         if center_gray > bright_thresh:
             continue
 
-        # Must overlap with our fruit mask
         circle_mask = np.zeros(mask.shape, dtype=np.uint8)
         cv2.circle(circle_mask, (x, y), r, 255, -1)
         overlap     = np.sum(cv2.bitwise_and(mask, circle_mask) > 0)
@@ -514,8 +515,6 @@ def count_hough(img_blur, mask, scale=1.0):
 
         valid.append((x, y, r))
 
-    # FIX: Apply Non-Maximum Suppression to remove duplicate circles
-    # on the same fruit before returning.
     return _nms_circles(valid, iou_thresh=0.5)
 
 
@@ -543,20 +542,8 @@ def process_video_frames(frames_rgb):
     Main pipeline for basket video.
     1. Estimates distance scale from blob sizes
     2. Picks best frame (most fruits visible)
-    3. Detects each individual calamansi using watershed
+    3. Detects each individual calamansi using watershed + aggressive dedup
     4. Returns features per fruit for juice prediction
-
-    Caller should handle None/zero return:
-
-        result = process_video_frames(frames)
-        if result is None or result['fruit_count'] == 0:
-            st.warning("⚠️ No calamansi detected. Point the camera at "
-                       "fruits on a plain surface with good lighting.")
-        elif result['fruit_count'] > 30:
-            st.warning("⚠️ Too many detections — ensure only fruits are "
-                       "in frame on a plain background.")
-        else:
-            st.success(f"✅ {result['fruit_count']} calamansi detected!")
     """
     best_frame = None
     best_count = 0
