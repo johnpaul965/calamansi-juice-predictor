@@ -31,7 +31,7 @@ HSV_RIPE_HI  = np.array([40, 255, 255])
 MIN_AVG_SAT  = 25
 MIN_SAT_VAL  = 25
 MIN_COVERAGE = 0.003
-MIN_OVERLAP  = 0.35
+MIN_OVERLAP  = 0.50   # FIX: raised from 0.35 to reduce spurious mask matches
 
 # ─────────────────────────────────────────
 # SCENE VALIDATION THRESHOLDS
@@ -100,6 +100,13 @@ def _brightness_contrast_mask(img_blur):
     k    = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+
+    # FIX: Suppress shadows — erode aggressively to remove thin shadow blobs
+    # Shadows tend to be large, irregular, low-saturation regions.
+    # We shrink the mask so only compact (fruit-like) blobs survive.
+    mask = cv2.erode(mask, np.ones((7, 7), np.uint8), iterations=2)
+    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
+
     return mask
 
 
@@ -274,12 +281,73 @@ def compute_features(cnt, mask, hsv, ppc):
     }
 
 
+# ─────────────────────────────────────────
+# FIX: Non-Maximum Suppression for circles
+# Removes duplicate overlapping Hough circles
+# so one fruit = one detection.
+# ─────────────────────────────────────────
+def _nms_circles(circles, iou_thresh=0.5):
+    """Remove duplicate overlapping Hough circles (Non-Maximum Suppression)."""
+    if not circles:
+        return []
+    # Sort by radius descending — prefer larger (more confident) detections
+    circles = sorted(circles, key=lambda c: c[2], reverse=True)
+    kept = []
+    for cx, cy, cr in circles:
+        duplicate = False
+        for kx, ky, kr in kept:
+            dist = np.sqrt((cx - kx) ** 2 + (cy - ky) ** 2)
+            # If centers are closer than iou_thresh * sum of radii → duplicate
+            if dist < (cr + kr) * iou_thresh:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append((cx, cy, cr))
+    return kept
+
+
+# ─────────────────────────────────────────
+# FIX: Deduplicate overlapping contours
+# Prevents watershed over-segmentation from
+# reporting 5 detections on a single fruit.
+# ─────────────────────────────────────────
+def _dedup_contours(feats, cnts, overlap_thresh=0.5):
+    """Remove contours whose enclosing circles overlap significantly."""
+    if len(cnts) <= 1:
+        return feats, cnts
+    centers = []
+    for cnt in cnts:
+        (x, y), r = cv2.minEnclosingCircle(cnt)
+        centers.append((x, y, r))
+    keep = [True] * len(centers)
+    for i in range(len(centers)):
+        if not keep[i]:
+            continue
+        for j in range(i + 1, len(centers)):
+            if not keep[j]:
+                continue
+            xi, yi, ri = centers[i]
+            xj, yj, rj = centers[j]
+            dist = np.sqrt((xi - xj) ** 2 + (yi - yj) ** 2)
+            if dist < (ri + rj) * overlap_thresh:
+                # Drop the smaller contour
+                if ri >= rj:
+                    keep[j] = False
+                else:
+                    keep[i] = False
+    kept_feats = [f for f, k in zip(feats, keep) if k]
+    kept_cnts  = [c for c, k in zip(cnts,  keep) if k]
+    return kept_feats, kept_cnts
+
+
 def get_fruit_features(img_blur, mask, hsv, ppc):
     """Watershed segmentation to get individual fruit features."""
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    _, sure_fg = cv2.threshold(dist_norm, 0.55 * dist_norm.max(), 255, 0)
+    # FIX: Raised threshold from 0.55 → 0.72 so a single fruit blob
+    # produces only ONE seed point instead of many, preventing over-splitting.
+    _, sure_fg = cv2.threshold(dist_norm, 0.72 * dist_norm.max(), 255, 0)
     sure_fg    = np.uint8(sure_fg)
     sure_bg    = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
     unknown    = cv2.subtract(sure_bg, sure_fg)
@@ -322,6 +390,9 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
             if f:
                 feats.append(f)
                 cnts.append(cnt)
+
+    # FIX: Deduplicate overlapping contours (catches watershed over-splits)
+    feats, cnts = _dedup_contours(feats, cnts, overlap_thresh=0.5)
 
     return feats, cnts
 
@@ -443,7 +514,9 @@ def count_hough(img_blur, mask, scale=1.0):
 
         valid.append((x, y, r))
 
-    return valid
+    # FIX: Apply Non-Maximum Suppression to remove duplicate circles
+    # on the same fruit before returning.
+    return _nms_circles(valid, iou_thresh=0.5)
 
 
 # ─────────────────────────────────────────
