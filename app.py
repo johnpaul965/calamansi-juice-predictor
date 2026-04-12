@@ -18,7 +18,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import cross_val_score, KFold
 
 from feature_extraction import preprocess_array, segment_fruit, get_fruit_features, \
-    calibrate_ppc, count_hough, get_features_from_hough, FEATURE_COLS
+    calibrate_ppc, count_hough, FEATURE_COLS
 
 st.set_page_config(
     page_title="Calamansi Juice Yield Prediction System",
@@ -346,8 +346,6 @@ is_admin = role == "admin"
 with st.sidebar:
     st.markdown("## Navigation")
 
-    # Admin: View all history, Manage Users, Model Performance
-    # User:  Home Page, Predict Page, History page
     if is_admin:
         pages = ["🕐 View All History", "👥 Manage Users", "📊 Model Performance"]
     else:
@@ -400,9 +398,9 @@ def detect_on_frame(img_rgb):
     mask, hsv         = segment_fruit(img_blur)
     circles           = count_hough(img_blur, mask)
     ppc               = calibrate_ppc(circles) if circles else 41.0
-    all_features, valid_cnts = get_features_from_hough(img_blur, circles, ppc)
-    if not all_features:
-        all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
+
+    # ── FIX: always use get_fruit_features (removed get_features_from_hough bypass) ──
+    all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
     annotated = img_blur.copy()
     for i, cnt in enumerate(valid_cnts):
@@ -701,14 +699,12 @@ elif page in ("🕐 History", "🕐 View All History"):
 
     # ── Summary stats ──────────────────────────────────
     if is_admin:
-        # Admin: aggregate stats across all users
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Sessions", len(df))
         c2.metric("Unique Users",   df["user"].nunique())
         c3.metric("Total Fruits",   int(df["fruits"].sum()))
         c4.metric("Total Juice",    f"{df['juice_ml'].sum():.1f} mL")
     else:
-        # User: only their own stats
         stats = user_stats(username)
         c1, c2, c3 = st.columns(3)
         c1.metric("My Sessions",  stats["sessions"])
@@ -725,7 +721,6 @@ elif page in ("🕐 History", "🕐 View All History"):
             df = df[df["user"] == sel_user]
 
     # ── Table ──────────────────────────────────────────
-    # Admin sees the "user" column; regular users do not
     if is_admin:
         display_cols = ["user", "date", "fruits", "juice_ml"]
         col_labels   = {"user": "User", "date": "Date & Time", "fruits": "Fruits", "juice_ml": "Juice (mL)"}
@@ -767,14 +762,13 @@ elif page in ("🕐 History", "🕐 View All History"):
     with col_info:
         st.markdown("**Session Details**")
         if is_admin:
-            st.write(f"**User:** {sel_row['user']}")   # Admin sees who owns this record
+            st.write(f"**User:** {sel_row['user']}")
         st.write(f"**Date:** {sel_row['date'].strftime('%Y-%m-%d %H:%M:%S')}")
         st.write(f"**Fruits detected:** {sel_row['fruits']}")
         st.write(f"**Juice yield:** {sel_row['juice_ml']} mL")
 
         st.divider()
 
-        # Admin can delete any record; user can only delete their own
         can_delete = is_admin or sel_row["user"] == username
         if can_delete:
             if st.button("🗑️ Delete this record", type="secondary"):
