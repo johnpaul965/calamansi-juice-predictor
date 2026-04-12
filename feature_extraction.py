@@ -4,9 +4,9 @@ import numpy as np
 # ─────────────────────────────────────────
 # FEATURE EXTRACTION MODULE
 # Calamansi Juice Yield Prediction System
-# VERSION: v5-no-watershed
+# VERSION: v6-single-fruit-fix
 # ─────────────────────────────────────────
-VERSION = "v5-no-watershed"
+VERSION = "v6-single-fruit-fix"
 print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
@@ -80,18 +80,17 @@ def _brightness_contrast_mask(img_blur):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
-    # Shadow suppression — stronger erode to kill faint shadow blobs
+    # Shadow suppression
     mask = cv2.erode(mask,  np.ones((11, 11), np.uint8), iterations=2)
     mask = cv2.dilate(mask, np.ones((7,  7),  np.uint8), iterations=2)
 
-    # Extra: remove any blob whose mean brightness is too high (shadows are lighter)
+    # Remove blobs whose mean brightness is too high (shadows are lighter)
     cnts_s, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     gray_s = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     for cnt_s in cnts_s:
         tmp = np.zeros_like(mask)
         cv2.drawContours(tmp, [cnt_s], -1, 255, -1)
         mean_bright = float(np.mean(gray_s[tmp > 0]))
-        # If the blob is brighter than 100, it's a shadow/highlight, not fruit
         if mean_bright > 100:
             cv2.drawContours(mask, [cnt_s], -1, 0, -1)
 
@@ -112,19 +111,15 @@ def _estimate_distance_scale(img_blur, mask):
 def _merge_overlapping_mask_blobs(mask, img_blur=None):
     """
     Groups nearby mask fragments and redraws as convex-hull blobs.
-
-    Step 1 — Drop shadow blobs: any blob whose area < 40% of the largest
-             AND whose mean brightness > 115% of the largest blob is a
-             shadow/highlight → erase it before merging.
-
-    Step 2 — Dynamic PROXIMITY: scales with fruit size so close-up shots
-             (large fruit radius) allow a larger gap between fragments.
+    FIX v6: PROXIMITY now uses ABSOLUTE pixel value (60px) as a floor
+    so tiny fragments near a fruit always get merged regardless of their
+    own radius.
     """
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if len(cnts) <= 1:
         return mask
 
-    # ── Step 1: erase shadow/highlight blobs ──────────────────────────────
+    # Erase shadow/highlight blobs
     if img_blur is not None:
         gray     = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
         areas    = [cv2.contourArea(c) for c in cnts]
@@ -147,7 +142,6 @@ def _merge_overlapping_mask_blobs(mask, img_blur=None):
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if len(cnts) <= 1:
             return mask
-    # ──────────────────────────────────────────────────────────────────────
 
     rects = [cv2.boundingRect(c) for c in cnts]
     parent = list(range(len(rects)))
@@ -161,10 +155,12 @@ def _merge_overlapping_mask_blobs(mask, img_blur=None):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # ── Step 2: dynamic proximity ─────────────────────────────────────────
+    # FIX v6: use the LARGEST blob's radius (not the current blob pair)
+    # so fragments far from the largest blob still get pulled in
     circles_r   = [cv2.minEnclosingCircle(c)[1] for c in cnts]
     max_r_blobs = max(circles_r) if circles_r else 30
-    PROXIMITY   = max(30, int(max_r_blobs * 0.8))
+    # Floor of 60px ensures tiny shadow fragments near the fruit get merged
+    PROXIMITY   = max(60, int(max_r_blobs * 1.2))
 
     for i in range(len(rects)):
         xi, yi, wi, hi = rects[i]
@@ -204,7 +200,7 @@ def segment_fruit(img_blur, scale=1.0):
     else:
         mask = hsv_mask
 
-    # Merge nearby fragments before watershed
+    # Merge nearby fragments before further processing
     mask = _merge_overlapping_mask_blobs(mask, img_blur)
 
     max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
@@ -340,128 +336,17 @@ def _nms_circles(circles, iou_thresh=0.5):
     return kept
 
 
-def _dedup_contours(feats, cnts):
-    """
-    Aggressive deduplication of contours.
-
-    FIX 2: Widened merge radius from 1.2x to 2.0x max_r so that large
-    fruits split into top/bottom halves still get merged at close range.
-
-    FIX 3: Secondary pass removes any remaining overlapping pairs
-    (overlap > 70%) keeping only the largest contour.
-    """
-    if len(cnts) <= 1:
-        return feats, cnts
-
-    # Build (cx, cy, r, area) for each contour
-    info = []
-    for cnt in cnts:
-        (cx, cy), r = cv2.minEnclosingCircle(cnt)
-        area = cv2.contourArea(cnt)
-        info.append((cx, cy, r, area))
-
-    parent = list(range(len(cnts)))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i, j):
-        parent[find(i)] = find(j)
-
-    for i in range(len(info)):
-        cx_i, cy_i, r_i, _ = info[i]
-        for j in range(i + 1, len(info)):
-            cx_j, cy_j, r_j, _ = info[j]
-            dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
-            max_r = max(r_i, r_j)
-            # FIX 2: Widened to 3.0x — catches shadow blobs adjacent to fruit
-            if dist < max_r * 3.0:
-                union(i, j)
-
-    groups = {}
-    for i in range(len(cnts)):
-        g = find(i)
-        groups.setdefault(g, []).append(i)
-
-    kept_feats, kept_cnts = [], []
-    for g, idxs in groups.items():
-        # Keep the one with the largest contour area
-        best_idx = max(idxs, key=lambda i: info[i][3])
-        kept_feats.append(feats[best_idx])
-        kept_cnts.append(cnts[best_idx])
-
-    # ── FIX 3: Secondary overlap pass ─────────────────────────────────────
-    # Recompute centers after first-pass dedup
-    if len(kept_cnts) > 1:
-        centers = []
-        for cnt in kept_cnts:
-            (cx, cy), r = cv2.minEnclosingCircle(cnt)
-            centers.append((cx, cy, r))
-
-        dominated = set()
-        for i in range(len(centers)):
-            if i in dominated:
-                continue
-            for j in range(i + 1, len(centers)):
-                if j in dominated:
-                    continue
-                cx_i, cy_i, r_i = centers[i]
-                cx_j, cy_j, r_j = centers[j]
-                dist = np.sqrt((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2)
-                # If circles overlap by more than 50%, drop the smaller one
-                if dist < (r_i + r_j) * 0.50:
-                    area_i = cv2.contourArea(kept_cnts[i])
-                    area_j = cv2.contourArea(kept_cnts[j])
-                    if area_i >= area_j:
-                        dominated.add(j)
-                    else:
-                        dominated.add(i)
-
-        kept_feats = [f for i, f in enumerate(kept_feats) if i not in dominated]
-        kept_cnts  = [c for i, c in enumerate(kept_cnts)  if i not in dominated]
-    # ──────────────────────────────────────────────────────────────────────
-
-    # ── FINAL CAP: if all kept contours cluster within 1 fruit-width, keep only largest ──
-    if len(kept_cnts) > 1:
-        centers2 = []
-        for cnt in kept_cnts:
-            (cx, cy), r = cv2.minEnclosingCircle(cnt)
-            centers2.append((cx, cy, r))
-
-        # Find bounding box of all centers
-        xs = [c[0] for c in centers2]
-        ys = [c[1] for c in centers2]
-        spread = np.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
-        max_r_all = max(c[2] for c in centers2)
-
-        # If all centers fit within 2x the largest radius → single fruit, keep largest
-        if spread < max_r_all * 2.0:
-            best_i = max(range(len(kept_cnts)), key=lambda i: cv2.contourArea(kept_cnts[i]))
-            kept_feats = [kept_feats[best_i]]
-            kept_cnts  = [kept_cnts[best_i]]
-    # ───────────────────────────────────────────────────────────────────────────────────
-
-    return kept_feats, kept_cnts
-
-
 def get_fruit_features(img_blur, mask, hsv, ppc):
     """
     Detects individual calamansi fruits from the segmentation mask.
 
-    Strategy (in order):
-      1. Find all external contours in the mask.
-      2. Remove shadow/highlight blobs: keep only the darkest blobs.
-         (shadows cast by a fruit are lighter than the fruit itself)
-      3. Merge any remaining blobs that are within 1 fruit-radius of
-         each other — they are fragments of the same fruit.
-      4. For each surviving blob, compute features directly from the
-         largest contour.  NO watershed — watershed is the source of
-         all false splits.
-      5. Final NMS: if two result circles overlap by > 40%, drop the
-         smaller one.
+    v6 KEY FIX: After all blob filtering, we do one final aggressive
+    spatial cluster check — if all surviving blobs fit within a circle
+    of radius = largest_blob_radius * 2.5, they are ALL the same fruit.
+    Merge them into a single convex hull and return 1 result.
+
+    This directly fixes the "1 fruit detected as 4" bug seen when the
+    fruit mask fragments into several small blobs due to shadows/highlights.
     """
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
 
@@ -471,7 +356,7 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     if not raw_cnts:
         return [], []
 
-    # ── 2. Score each blob by fruit color (green HSV) vs shadow (blue) ──
+    # ── 2. Score each blob by fruit color ────────────────────────────────
     blob_info = []
     for cnt in raw_cnts:
         tmp = np.zeros(mask.shape, dtype=np.uint8)
@@ -485,7 +370,6 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
         (cx, cy), r = cv2.minEnclosingCircle(cnt)
         mean_hue    = float(np.mean(px_hsv[:, 0]))
         mean_sat    = float(np.mean(px_hsv[:, 1]))
-        # Fruit = green hue (H 20-105), reasonably saturated
         hue_ok      = 1.0 if 20 <= mean_hue <= 105 else 0.0
         sat_score   = float(np.clip(mean_sat / 80.0, 0.0, 1.0))
         fruit_score = hue_ok * 0.6 + sat_score * 0.4
@@ -512,6 +396,37 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     if not keep:
         keep = [max(blob_info, key=lambda b: b['area'])]
 
+    # ── v6 PRE-MERGE: if all kept blobs are spatially close, treat as ONE fruit ──
+    # This is the primary fix for the "1 fruit → 4 detections" bug.
+    if len(keep) > 1:
+        max_r_keep = max(b['r'] for b in keep)
+        xs = [b['cx'] for b in keep]
+        ys = [b['cy'] for b in keep]
+        centroid_x = float(np.mean(xs))
+        centroid_y = float(np.mean(ys))
+        # Max distance from centroid to any blob center
+        max_spread = max(
+            np.sqrt((b['cx'] - centroid_x)**2 + (b['cy'] - centroid_y)**2)
+            for b in keep
+        )
+        # If all blobs fit within 2.5x the largest blob's radius → one fruit
+        if max_spread < max_r_keep * 2.5:
+            all_pts = np.vstack([b['cnt'] for b in keep])
+            hull    = cv2.convexHull(all_pts)
+            single  = np.zeros(mask.shape, dtype=np.uint8)
+            cv2.drawContours(single, [hull], -1, 255, -1)
+            if _has_fruit_color(hsv, single):
+                f = compute_features(hull, mask, hsv, ppc)
+                if f:
+                    return [f], [hull]
+            # fallback: just use the largest blob
+            best_b = max(keep, key=lambda b: b['area'])
+            f = compute_features(best_b['cnt'], mask, hsv, ppc)
+            if f:
+                return [f], [best_b['cnt']]
+            return [], []
+    # ─────────────────────────────────────────────────────────────────────
+
     # ── 3. Merge nearby blobs (same fruit, fragmented) ────────────────────
     parent = list(range(len(keep)))
 
@@ -524,13 +439,16 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     def union(i, j):
         parent[find(i)] = find(j)
 
+    # FIX v6: use the GLOBAL max_r across all kept blobs for merge radius
+    # (not per-pair max_r), so tiny shadow fragments still get absorbed
+    global_max_r = max(b['r'] for b in keep)
+    MERGE_RADIUS = max(global_max_r * 3.0, 60.0)
+
     for i in range(len(keep)):
         for j in range(i + 1, len(keep)):
-            bi, bj  = keep[i], keep[j]
-            dist    = np.sqrt((bi['cx'] - bj['cx'])**2 + (bi['cy'] - bj['cy'])**2)
-            max_r   = max(bi['r'], bj['r'])
-            # Merge if centers are within 2.5× the larger radius
-            if dist < max_r * 2.5:
+            bi, bj = keep[i], keep[j]
+            dist   = np.sqrt((bi['cx'] - bj['cx'])**2 + (bi['cy'] - bj['cy'])**2)
+            if dist < MERGE_RADIUS:
                 union(i, j)
 
     groups = {}
@@ -541,12 +459,10 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     # ── 4. One result per group ───────────────────────────────────────────
     feats, result_cnts = [], []
     for g, idxs in groups.items():
-        # Within a group keep the largest-area blob
         best = max(idxs, key=lambda i: keep[i]['area'])
         cnt  = keep[best]['cnt']
 
         if not is_calamansi(cnt, ppc):
-            # Try the merged convex hull of the whole group
             all_pts = np.vstack([keep[i]['cnt'] for i in idxs])
             hull    = cv2.convexHull(all_pts)
             if not is_calamansi(hull, ppc):
@@ -580,7 +496,6 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
                 cx_i, cy_i, r_i = circles_info[i]
                 cx_j, cy_j, r_j = circles_info[j]
                 dist = np.sqrt((cx_i - cx_j)**2 + (cy_i - cy_j)**2)
-                # If overlap > 40 %, drop the smaller
                 if dist < (r_i + r_j) * 0.70:
                     area_i = cv2.contourArea(result_cnts[i])
                     area_j = cv2.contourArea(result_cnts[j])
@@ -588,6 +503,24 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
 
         feats       = [f for i, f in enumerate(feats)       if i not in dominated]
         result_cnts = [c for i, c in enumerate(result_cnts) if i not in dominated]
+
+    # ── 6. FINAL SAFETY: if all results overlap heavily → keep only largest ──
+    if len(result_cnts) > 1:
+        centers = []
+        for cnt in result_cnts:
+            (cx, cy), r = cv2.minEnclosingCircle(cnt)
+            centers.append((cx, cy, r))
+
+        xs = [c[0] for c in centers]
+        ys = [c[1] for c in centers]
+        spread   = np.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
+        max_r_f  = max(c[2] for c in centers)
+
+        if spread < max_r_f * 2.0:
+            best_i     = max(range(len(result_cnts)),
+                             key=lambda i: cv2.contourArea(result_cnts[i]))
+            feats       = [feats[best_i]]
+            result_cnts = [result_cnts[best_i]]
 
     return feats, result_cnts
 
@@ -724,11 +657,8 @@ def process_video_frames(frames_rgb):
     Main pipeline for basket video.
     1. Estimates distance scale from blob sizes
     2. Picks best frame (most fruits visible)
-    3. Detects each individual calamansi using watershed + aggressive dedup
+    3. Detects each individual calamansi
     4. Returns features per fruit for juice prediction
-
-    FIX 4: After feature extraction, sanity-checks the count against
-    the total mask area to prevent impossible over-counts at close range.
     """
     print(f"[process_video_frames] Running {VERSION}")
     best_frame = None
@@ -763,21 +693,18 @@ def process_video_frames(frames_rgb):
     basket_contour, _        = detect_basket(img_blur)
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
-    # ── FIX 4: Sanity-check count against mask area ────────────────────────
+    # Sanity-check count against mask area
     if all_features:
         total_mask_area = float(np.sum(mask > 0))
         avg_fruit_area  = float(np.mean([f['area_cm2'] for f in all_features]))
         ppc_sq          = ppc ** 2
-        # Each fruit occupies at least 60% of its expected pixel area
         max_possible = max(1, int(total_mask_area / (avg_fruit_area * ppc_sq * 0.6)) + 1)
 
         if len(all_features) > max_possible:
-            # Too many detections — keep only the largest by area
             paired       = sorted(zip(all_features, valid_cnts),
                                   key=lambda x: x[0]['area_cm2'], reverse=True)
             all_features = [p[0] for p in paired[:max_possible]]
             valid_cnts   = [p[1] for p in paired[:max_possible]]
-    # ──────────────────────────────────────────────────────────────────────
 
     return {
         'features':       all_features,
