@@ -418,7 +418,24 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
 
     FIX 1: Raised watershed seed threshold from 0.72 → 0.85 so a single
     large fruit only gets ONE seed instead of being split into many.
+
+    FAST PATH: If the mask has only ONE connected blob, skip watershed
+    entirely and return that blob directly — avoids all false splits.
     """
+    # ── FAST PATH: single blob → guaranteed 1 fruit ───────────────────────
+    raw_cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid_blobs = [c for c in raw_cnts if cv2.contourArea(c) > 200]
+
+    if len(valid_blobs) == 1:
+        cnt = valid_blobs[0]
+        single = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.drawContours(single, [cnt], -1, 255, -1)
+        if is_calamansi(cnt, ppc) and _has_fruit_color(hsv, single):
+            f = compute_features(cnt, mask, hsv, ppc)
+            if f:
+                return [f], [cnt]
+    # ──────────────────────────────────────────────────────────────────────
+
     dist      = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
