@@ -4,7 +4,10 @@ import numpy as np
 # ─────────────────────────────────────────
 # FEATURE EXTRACTION MODULE
 # Calamansi Juice Yield Prediction System
+# VERSION: v5-no-watershed
 # ─────────────────────────────────────────
+VERSION = "v5-no-watershed"
+print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
 MIN_CIRCULARITY = 0.40
@@ -727,6 +730,7 @@ def process_video_frames(frames_rgb):
     FIX 4: After feature extraction, sanity-checks the count against
     the total mask area to prevent impossible over-counts at close range.
     """
+    print(f"[process_video_frames] Running {VERSION}")
     best_frame = None
     best_count = 0
 
