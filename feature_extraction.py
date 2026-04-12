@@ -18,12 +18,10 @@ FEATURE_COLS = [
 
 # ─────────────────────────────────────────
 # HSV COLOR RANGES FOR CALAMANSI
-# Note: under certain lighting/backgrounds
-# the fruit hue shifts toward cyan (H~100).
-# The brightness-contrast fallback handles
-# these cases automatically.
+# Wide hue range to handle camera white
+# balance shifts (e.g. H~103 cyan on blue).
 # ─────────────────────────────────────────
-HSV_GREEN_LO = np.array([25, 30, 15])   # wide — catches shifted hues
+HSV_GREEN_LO = np.array([25, 30, 15])
 HSV_GREEN_HI = np.array([100, 255, 210])
 HSV_RIPE_LO  = np.array([10, 35, 35])
 HSV_RIPE_HI  = np.array([40, 255, 255])
@@ -39,6 +37,15 @@ MIN_OVERLAP  = 0.35
 MAX_FRUIT_COVERAGE = 0.55
 MIN_BG_MEAN        = 60
 MAX_BG_STD         = 75
+
+# ─────────────────────────────────────────
+# HAND / SKIN DETECTION THRESHOLDS
+# Rejects frames where the user is holding
+# the fruit instead of placing it flat.
+# ─────────────────────────────────────────
+SKIN_HSV_LO       = np.array([0,  20,  70])
+SKIN_HSV_HI       = np.array([20, 170, 255])
+MAX_SKIN_COVERAGE = 0.15   # >15% skin pixels → hand in frame
 
 
 def _square_crop(image_array):
@@ -69,34 +76,46 @@ def preprocess_array(image_array):
         (5, 5), 0)
 
 
+def _has_hand_in_frame(img_blur):
+    """
+    Detect if a human hand is holding the fruit.
+    Uses skin-tone HSV range. Returns True if >15% of
+    the frame is covered by skin-coloured pixels.
+
+    When True, count_hough() returns [] immediately and
+    the Streamlit app should show:
+      st.error("🖐️ Hand detected. Place fruits flat on a surface.")
+    """
+    hsv       = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    skin_mask = cv2.inRange(hsv, SKIN_HSV_LO, SKIN_HSV_HI)
+    total_px  = img_blur.shape[0] * img_blur.shape[1]
+    coverage  = np.sum(skin_mask > 0) / total_px
+    return coverage > MAX_SKIN_COVERAGE
+
+
 def _brightness_contrast_mask(img_blur):
     """
     Fallback segmentation using brightness contrast only.
 
-    When the background is uniform and bright (white, blue, grey paper),
-    the fruit appears as a distinctly DARKER blob. This detector finds
-    pixels that are significantly darker than the background median,
-    regardless of their color/hue.
+    When the background is uniform and bright (white, blue, grey),
+    the fruit appears as a distinctly DARKER blob. Finds pixels
+    significantly darker than the background median regardless of hue.
 
-    This handles cases where camera white-balance shifts the fruit hue
-    outside the expected green range (e.g. H=103 cyan on blue surface).
+    Handles camera white-balance shifts where fruit hue falls
+    outside the expected green HSV range.
 
-    Returns a binary mask of dark blobs, or None if background is not
-    uniform enough to use this method safely.
+    Returns mask or None if background is not uniform enough.
     """
     gray    = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     bg_mean = float(np.mean(gray))
     bg_std  = float(np.std(gray))
 
-    # Only use this method when background is bright AND uniform
-    # (avoids false positives on cluttered dark backgrounds)
+    # Only safe on bright uniform backgrounds
     if bg_mean < 100 or bg_std > 60:
         return None
 
-    # Threshold: pixels more than 1.5 std below the mean are "dark objects"
     dark_thresh = max(0, int(bg_mean - max(bg_std * 1.5, 25)))
     _, mask = cv2.threshold(gray, dark_thresh, 255, cv2.THRESH_BINARY_INV)
-
     k    = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
@@ -105,11 +124,8 @@ def _brightness_contrast_mask(img_blur):
 
 def _estimate_distance_scale(img_blur, mask):
     """
-    Estimate a scale factor based on how large the fruit blobs appear.
-    Returns:
-      > 1.0  → camera is close  (fruits appear large)
-      = 1.0  → camera at ideal distance (~10-12 inches)
-      < 1.0  → camera is far   (fruits appear small)
+    Estimate scale factor from blob sizes.
+    > 1.0 = close, 1.0 = ideal (~10-12in), < 1.0 = far.
     """
     baseline_area = np.pi * (PIXELS_PER_CM * 1.25) ** 2
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -124,27 +140,22 @@ def _estimate_distance_scale(img_blur, mask):
 def segment_fruit(img_blur, scale=1.0):
     """
     Two-stage segmentation:
-    1. HSV color mask (primary — works on white background)
-    2. Brightness-contrast mask (fallback — works on any uniform background)
-    The union of both masks is returned.
+    1. HSV color mask (primary)
+    2. Brightness-contrast mask (fallback for shifted hues / non-white bg)
+    Union of both masks is returned.
     """
-    hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
-    mask1 = cv2.inRange(hsv, HSV_GREEN_LO, HSV_GREEN_HI)
-    mask2 = cv2.inRange(hsv, HSV_RIPE_LO,  HSV_RIPE_HI)
+    hsv      = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    mask1    = cv2.inRange(hsv, HSV_GREEN_LO, HSV_GREEN_HI)
+    mask2    = cv2.inRange(hsv, HSV_RIPE_LO,  HSV_RIPE_HI)
     hsv_mask = cv2.bitwise_or(mask1, mask2)
     k        = np.ones((3, 3), np.uint8)
     hsv_mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_CLOSE, k)
     hsv_mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_OPEN,  k)
 
-    # Brightness-contrast fallback
     bc_mask = _brightness_contrast_mask(img_blur)
-    if bc_mask is not None:
-        # Union: accept pixels detected by EITHER method
-        mask = cv2.bitwise_or(hsv_mask, bc_mask)
-    else:
-        mask = hsv_mask
+    mask    = cv2.bitwise_or(hsv_mask, bc_mask) if bc_mask is not None else hsv_mask
 
-    # Remove blobs too large to be fruits, scaled by distance
+    # Remove blobs too large to be individual fruits
     max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
     size_ceiling      = max_fruit_area_px * 3 * (scale ** 2)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -158,8 +169,8 @@ def segment_fruit(img_blur, scale=1.0):
 def _is_valid_scan_scene(img_blur, mask):
     """
     Reject frames that don't look like a proper fruit scan.
-    Accepts white, blue, grey, and light coloured surfaces.
-    Rejects very dark cluttered rooms/desks.
+    Accepts white, blue, grey surfaces.
+    Rejects dark cluttered rooms/desks.
     """
     H, W     = img_blur.shape[:2]
     total_px = H * W
@@ -184,12 +195,12 @@ def _is_valid_scan_scene(img_blur, mask):
 
 
 def detect_basket(img_blur):
-    """Detect basket/container boundary. Falls back to largest contour."""
+    """Detect basket/container boundary. Falls back to frame edges."""
     gray  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     H, W  = img_blur.shape[:2]
 
-    edges = cv2.Canny(cv2.GaussianBlur(gray, (7, 7), 0), 20, 80)
-    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
+    edges    = cv2.Canny(cv2.GaussianBlur(gray, (7, 7), 0), 20, 80)
+    edges    = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     img_area = H * W
@@ -234,19 +245,16 @@ def is_calamansi(cnt, ppc):
 
 def _has_fruit_color(hsv, mask_region):
     """
-    Validate that a detected region has fruit-like properties.
-    Relaxed for camera white-balance shifted fruits (cyan hue on blue bg).
+    Validate that a region has fruit-like properties.
+    Relaxed hue check — handles white-balance shifted fruits.
     """
     px = hsv[mask_region > 0]
     if len(px) == 0:
         return False
     avg_sat = np.mean(px[:, 1])
     avg_val = np.mean(px[:, 2])
-
-    # Must have some saturation — pure grey/white background has S≈0
     if avg_sat < MIN_AVG_SAT:
         return False
-    # Reject pure white overexposure
     if avg_val > 240:
         return False
     return True
@@ -380,8 +388,13 @@ def get_features_from_hough(img_blur, circles, ppc):
 def count_hough(img_blur, mask, scale=1.0):
     """
     Hough circle detection with strict false-positive prevention.
-    Parameters scale with distance so close/far shots both work.
-    Uses brightness-contrast mask when HSV mask is too sparse.
+
+    Guards (in order):
+      1. Minimum fruit mask coverage
+      2. Hand / skin-tone detection  ← NEW
+      3. Scene validation (bright uniform background)
+      4. Hough circle fitting with scaled parameters
+      5. Per-circle color + overlap validation
     """
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     hsv  = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
@@ -392,12 +405,19 @@ def count_hough(img_blur, mask, scale=1.0):
     if fruit_px / total_px < MIN_COVERAGE:
         return []
 
-    # Guard 2: Scene must look like a proper fruit scan setup
+    # Guard 2: Reject hand-held scans
+    # If >15% of frame is skin-tone, user is holding the fruit.
+    # Streamlit app should show:
+    #   st.error("🖐️ Hand detected. Place fruits flat on a plain surface.")
+    if _has_hand_in_frame(img_blur):
+        return []
+
+    # Guard 3: Scene must look like a proper flat-surface scan
     if not _is_valid_scan_scene(img_blur, mask):
         return []
 
     mean_v        = float(gray.mean())
-    bright_thresh = min(int(mean_v - 15), 200)  # fruits must be darker than bg
+    bright_thresh = min(int(mean_v - 15), 200)
 
     # Scale Hough parameters by distance scale factor
     min_r = max(5,   int(8  * scale))
@@ -409,8 +429,8 @@ def count_hough(img_blur, mask, scale=1.0):
         cv2.HOUGH_GRADIENT,
         dp=1.2,
         minDist=min_d,
-        param1=35,   # lowered for low-contrast dark fruits
-        param2=18,   # lowered to catch darker fruits on bright bg
+        param1=35,
+        param2=18,
         minRadius=min_r,
         maxRadius=max_r,
     )
@@ -425,12 +445,10 @@ def count_hough(img_blur, mask, scale=1.0):
         y1, y2 = max(0, y-3), min(gray.shape[0], y+4)
         x1, x2 = max(0, x-3), min(gray.shape[1], x+4)
 
-        # Center must be darker than background
         center_gray = float(np.mean(gray[y1:y2, x1:x2]))
         if center_gray > bright_thresh:
             continue
 
-        # Must overlap with our fruit mask
         circle_mask = np.zeros(mask.shape, dtype=np.uint8)
         cv2.circle(circle_mask, (x, y), r, 255, -1)
         overlap     = np.sum(cv2.bitwise_and(mask, circle_mask) > 0)
@@ -473,17 +491,20 @@ def process_video_frames(frames_rgb):
     3. Detects each individual calamansi using watershed
     4. Returns features per fruit for juice prediction
 
-    Caller should handle None/zero return:
+    Caller should handle the return value:
 
         result = process_video_frames(frames)
         if result is None or result['fruit_count'] == 0:
-            st.warning("⚠️ No calamansi detected. Point the camera at "
-                       "fruits on a plain surface with good lighting.")
+            st.warning("⚠️ No calamansi detected. Place fruits flat on "
+                       "a plain surface with good lighting.")
         elif result['fruit_count'] > 30:
             st.warning("⚠️ Too many detections — ensure only fruits are "
                        "in frame on a plain background.")
         else:
             st.success(f"✅ {result['fruit_count']} calamansi detected!")
+
+    If a hand is detected in every frame, process_video_frames returns None.
+    Show: st.error("🖐️ Hand detected. Place fruits flat on a plain surface.")
     """
     best_frame = None
     best_count = 0
@@ -513,7 +534,7 @@ def process_video_frames(frames_rgb):
     circles  = best_frame['circles']
     scale    = best_frame['scale']
 
-    ppc = calibrate_ppc(circles, scale=scale)
+    ppc                      = calibrate_ppc(circles, scale=scale)
     basket_contour, _        = detect_basket(img_blur)
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
