@@ -106,17 +106,47 @@ def _estimate_distance_scale(img_blur, mask):
     return float(np.clip(scale, 0.4, 3.5))
 
 
-def _merge_overlapping_mask_blobs(mask):
+def _merge_overlapping_mask_blobs(mask, img_blur=None):
     """
-    Groups nearby mask fragments (caused by notebook lines or shadows)
-    and redraws them as single convex-hull blobs.
-    PROXIMITY controls how far apart two fragments can be and still merge.
+    Groups nearby mask fragments and redraws as convex-hull blobs.
+
+    Step 1 — Drop shadow blobs: any blob whose area < 40% of the largest
+             AND whose mean brightness > 115% of the largest blob is a
+             shadow/highlight → erase it before merging.
+
+    Step 2 — Dynamic PROXIMITY: scales with fruit size so close-up shots
+             (large fruit radius) allow a larger gap between fragments.
     """
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if len(cnts) <= 1:
         return mask
 
-    rects  = [cv2.boundingRect(c) for c in cnts]
+    # ── Step 1: erase shadow/highlight blobs ──────────────────────────────
+    if img_blur is not None:
+        gray     = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+        areas    = [cv2.contourArea(c) for c in cnts]
+        max_area = max(areas)
+
+        largest_cnt  = cnts[int(np.argmax(areas))]
+        largest_mask = np.zeros_like(mask)
+        cv2.drawContours(largest_mask, [largest_cnt], -1, 255, -1)
+        fruit_brightness = float(np.mean(gray[largest_mask > 0]))
+
+        clean = np.zeros_like(mask)
+        for cnt, area in zip(cnts, areas):
+            tmp = np.zeros_like(mask)
+            cv2.drawContours(tmp, [cnt], -1, 255, -1)
+            blob_brightness = float(np.mean(gray[tmp > 0]))
+            if area >= max_area * 0.40 or blob_brightness <= fruit_brightness * 1.15:
+                cv2.drawContours(clean, [cnt], -1, 255, -1)
+
+        mask = clean
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if len(cnts) <= 1:
+            return mask
+    # ──────────────────────────────────────────────────────────────────────
+
+    rects = [cv2.boundingRect(c) for c in cnts]
     parent = list(range(len(rects)))
 
     def find(i):
@@ -128,8 +158,10 @@ def _merge_overlapping_mask_blobs(mask):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # Increased proximity: merge blobs up to 30px apart
-    PROXIMITY = 30
+    # ── Step 2: dynamic proximity ─────────────────────────────────────────
+    circles_r   = [cv2.minEnclosingCircle(c)[1] for c in cnts]
+    max_r_blobs = max(circles_r) if circles_r else 30
+    PROXIMITY   = max(30, int(max_r_blobs * 0.8))
 
     for i in range(len(rects)):
         xi, yi, wi, hi = rects[i]
@@ -170,7 +202,7 @@ def segment_fruit(img_blur, scale=1.0):
         mask = hsv_mask
 
     # Merge nearby fragments before watershed
-    mask = _merge_overlapping_mask_blobs(mask)
+    mask = _merge_overlapping_mask_blobs(mask, img_blur)
 
     max_fruit_area_px = np.pi * (MAX_DIAMETER_CM / 2 * PIXELS_PER_CM) ** 2
     size_ceiling      = max_fruit_area_px * 3 * (scale ** 2)
