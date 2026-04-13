@@ -372,12 +372,23 @@ RTC_CONFIG   = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.co
 # ══════════════════════════════════════════════════════
 
 def predict_from_features(all_features):
-    TRAINING_AVG_JUICE = 5.30
-    TRAINING_AVG_DIAM  = 2.5
+    """Use the trained Linear Regression model — consistent with the paper."""
+    if not model_loaded:
+        # Fallback only if model file is missing at runtime
+        return [round(max(2.0, 5.30 * (f['diameter_cm'] / 2.5)), 2) for f in all_features]
+
+    try:
+        model_features = joblib.load('model_features.pkl')
+    except FileNotFoundError:
+        model_features = FEATURE_COLS  # fallback to all 8 features
+
     preds = []
     for f in all_features:
-        juice = TRAINING_AVG_JUICE * (f['diameter_cm'] / TRAINING_AVG_DIAM)
-        preds.append(round(max(2.0, juice), 2))
+        row    = [[f[feat] for feat in model_features]]
+        row_sc = scaler.transform(row)
+        juice  = float(model.predict(row_sc)[0])
+        juice  = round(max(2.0, min(juice, 7.2)), 2)
+        preds.append(juice)
     return preds
 
 
@@ -879,7 +890,11 @@ elif page == "📊 Model Performance":
         st.error("❌ Dataset not found."); st.stop()
 
     df     = pd.read_csv('calamansi_dataset.csv')
-    X      = df[FEATURE_COLS]; y = df['juice_ml']
+    try:
+        model_features = joblib.load('model_features.pkl')
+    except FileNotFoundError:
+        model_features = FEATURE_COLS  # fallback to all 8 features
+    X      = df[model_features]; y = df['juice_ml']
     X_sc   = scaler.transform(X)
     y_pred = model.predict(X_sc)
     mae    = mean_absolute_error(y, y_pred)
@@ -914,14 +929,14 @@ elif page == "📊 Model Performance":
     col1, col2 = st.columns(2)
     with col1:
         fig3, ax3 = plt.subplots(figsize=(7, 6))
-        corr = df[FEATURE_COLS+['juice_ml']].corr()
+        corr = df[model_features+['juice_ml']].corr()
         sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm',
                     mask=np.triu(np.ones_like(corr, dtype=bool)),
                     square=True, linewidths=0.5, ax=ax3, cbar_kws={"shrink": 0.8})
         ax3.set_title('Feature Correlation Heatmap')
         plt.tight_layout(); st.pyplot(fig3)
     with col2:
-        coef_df = pd.DataFrame({'Feature': FEATURE_COLS, 'Coefficient': model.coef_}).sort_values('Coefficient', ascending=True)
+        coef_df = pd.DataFrame({'Feature': model_features, 'Coefficient': model.coef_}).sort_values('Coefficient', ascending=True)
         colors  = ['#d73027' if c < 0 else '#1a9850' for c in coef_df['Coefficient']]
         fig4, ax4 = plt.subplots(figsize=(7, 6))
         ax4.barh(coef_df['Feature'], coef_df['Coefficient'], color=colors, edgecolor='white')
@@ -948,6 +963,6 @@ elif page == "📊 Model Performance":
 
     st.divider()
     eq = f"juice_ml = {model.intercept_:.4f}"
-    for feat, coef in zip(FEATURE_COLS, model.coef_):
+    for feat, coef in zip(model_features, model.coef_):
         eq += f" {'+'if coef>=0 else'-'} {abs(coef):.4f} × {feat}"
     st.code(eq, language=None)
