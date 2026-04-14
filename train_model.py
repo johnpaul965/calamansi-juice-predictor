@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import os
 import joblib
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
@@ -141,7 +141,7 @@ print(f"\n  juice_ml stats:\n{df['juice_ml'].describe().to_string()}")
 
 # ─────────────────────────────────────────
 # FEATURE CORRELATION ANALYSIS
-# Show which features are highly correlated (helps understand Ridge behavior)
+# Helps identify multicollinearity issues that may affect model stability
 # ─────────────────────────────────────────
 print("\n─── Feature Correlation Matrix (top correlated pairs) ───")
 corr_matrix = df[FEATURE_COLS].corr()
@@ -157,14 +157,14 @@ if high_corr_pairs:
     print("  Highly correlated features (|r| > 0.7):")
     for feat1, feat2, corr in sorted(high_corr_pairs, key=lambda x: abs(x[2]), reverse=True):
         print(f"    {feat1:30s} ↔ {feat2:30s}: {corr:+.3f}")
-    print("  → Ridge regression will handle this multicollinearity")
+    print("  ⚠️  High correlation may cause unstable coefficients in Linear Regression")
 else:
     print("  No highly correlated features found")
 
 
 # ─────────────────────────────────────────
 # USE ALL FEATURES (as stated in paper)
-# Ridge regression handles multicollinearity through regularization
+# Linear Regression uses all extracted features without regularization
 # ─────────────────────────────────────────
 MODEL_FEATURES = FEATURE_COLS  # Use ALL features from paper
 print(f"\n  Using all {len(MODEL_FEATURES)} features: {MODEL_FEATURES}")
@@ -197,38 +197,14 @@ X_test_sc  = scaler.transform(X_test)
 
 
 # ─────────────────────────────────────────
-# HYPERPARAMETER TUNING — Find optimal alpha
-# Use cross-validation to select best regularization strength
+# TRAIN LINEAR REGRESSION MODEL
+# No hyperparameters to tune — Linear Regression has no regularization
 # ─────────────────────────────────────────
-print("\n─── Tuning Ridge Alpha (regularization strength) ───")
-
-# Test a range of alpha values
-if len(df) >= 10:
-    # Use GridSearchCV for datasets with enough samples
-    param_grid = {'alpha': [0.1, 0.5, 1.0, 5.0, 10.0, 20.0, 50.0]}
-    grid_search = GridSearchCV(
-        Ridge(), 
-        param_grid, 
-        cv=min(5, len(X_train)),  # 5-fold or less if small dataset
-        scoring='r2',
-        n_jobs=-1
-    )
-    grid_search.fit(X_train_sc, y_train)
-    best_alpha = grid_search.best_params_['alpha']
-    print(f"  Best alpha: {best_alpha:.1f} (R² = {grid_search.best_score_:.4f})")
-else:
-    # For very small datasets, just use a sensible default
-    best_alpha = 10.0
-    print(f"  Small dataset — using alpha = {best_alpha}")
-
-
-# ─────────────────────────────────────────
-# TRAIN FINAL MODEL with best alpha
-# ─────────────────────────────────────────
-model = Ridge(alpha=best_alpha)
+print("\n─── Training Linear Regression Model ───")
+model = LinearRegression()
 model.fit(X_train_sc, y_train)
 
-print("\n─── Ridge Regression Coefficients ───")
+print("\n─── Linear Regression Coefficients ───")
 for feat, coef in zip(MODEL_FEATURES, model.coef_):
     print(f"  {feat:30s}: {coef:+.4f}")
 print(f"  {'Intercept':30s}: {model.intercept_:+.4f}")
@@ -239,17 +215,18 @@ vol_coef = model.coef_[vol_idx]
 if vol_coef > 0:
     print("\n  ✅ Volume coefficient is positive (physically correct)")
 else:
-    print("\n  ⚠️  Volume coefficient is negative — data may contain labeling errors")
+    print("\n  ⚠️  Volume coefficient is negative — possible multicollinearity or data issues")
 
 
 # ─────────────────────────────────────────
 # CROSS-VALIDATION (more reliable than single split)
+# Provides better estimate of model performance on unseen data
 # ─────────────────────────────────────────
 if len(df) >= 10:
     X_all_sc = scaler.transform(X)
     cv_folds = min(5, len(df))
     cv_scores = cross_val_score(
-        Ridge(alpha=best_alpha), 
+        LinearRegression(), 
         X_all_sc, 
         y, 
         cv=cv_folds, 
@@ -261,7 +238,7 @@ if len(df) >= 10:
     
     # Also get MAE from CV
     cv_mae_scores = -cross_val_score(
-        Ridge(alpha=best_alpha), 
+        LinearRegression(), 
         X_all_sc, 
         y, 
         cv=cv_folds, 
@@ -314,7 +291,8 @@ if r2_full < 0.5:
         "     • Checking ground_truth.csv juice_ml values are accurate\n"
         "     • Ensuring images are top-down, well-lit, one fruit each\n"
         "     • Adding more diverse samples (aim for 30+ fruits)\n"
-        "     • The relationship may be non-linear — consider Random Forest"
+        "     • The relationship may be non-linear — consider Random Forest\n"
+        "     • If multicollinearity is high, consider Ridge Regression"
     )
 elif r2_full < 0.7:
     print(
@@ -346,7 +324,7 @@ print(f"\n✅ Model saved         : {MODEL_FILE}")
 print(f"✅ Scaler saved        : {SCALER_FILE}")
 print(f"✅ Feature list saved  : model_features.pkl")
 print(f"\n📊 Model summary:")
-print(f"   • Algorithm      : Ridge Regression (alpha={best_alpha})")
+print(f"   • Algorithm      : Linear Regression")
 print(f"   • Features       : {len(MODEL_FEATURES)} (all from paper)")
 print(f"   • Training samples: {len(X_train)}")
 print(f"   • R² score       : {r2_full:.4f}")

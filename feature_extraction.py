@@ -6,7 +6,7 @@ import numpy as np
 # Calamansi Juice Yield Prediction System
 # VERSION: v6-single-fruit-fix
 # ─────────────────────────────────────────
-VERSION = "v6-single-fruit-fix"
+VERSION = "v7-multi-fruit-fix"
 print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
@@ -155,19 +155,19 @@ def _merge_overlapping_mask_blobs(mask, img_blur=None):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # FIX v6: use the LARGEST blob's radius (not the current blob pair)
-    # so fragments far from the largest blob still get pulled in
-    circles_r   = [cv2.minEnclosingCircle(c)[1] for c in cnts]
-    max_r_blobs = max(circles_r) if circles_r else 30
-    # Floor of 60px ensures tiny shadow fragments near the fruit get merged
-    PROXIMITY   = max(60, int(max_r_blobs * 1.2))
+    # v7 FIX: use per-pair average radius with a small gap allowance.
+    # Merges shadow/highlight fragments of the SAME fruit (gap < 0.5*r)
+    # but does NOT merge two separate fruits sitting next to each other.
+    circles_r = [cv2.minEnclosingCircle(c)[1] for c in cnts]
 
     for i in range(len(rects)):
         xi, yi, wi, hi = rects[i]
         for j in range(i + 1, len(rects)):
             xj, yj, wj, hj = rects[j]
-            gap_x = max(0, max(xi, xj) - min(xi + wi, xj + wj))
-            gap_y = max(0, max(yi, yj) - min(yi + hi, yj + hj))
+            gap_x     = max(0, max(xi, xj) - min(xi + wi, xj + wj))
+            gap_y     = max(0, max(yi, yj) - min(yi + hi, yj + hj))
+            pair_r    = min(circles_r[i], circles_r[j])
+            PROXIMITY = max(8, int(pair_r * 0.5))
             if gap_x <= PROXIMITY and gap_y <= PROXIMITY:
                 union(i, j)
 
@@ -409,8 +409,10 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
             np.sqrt((b['cx'] - centroid_x)**2 + (b['cy'] - centroid_y)**2)
             for b in keep
         )
-        # If all blobs fit within 2.5x the largest blob's radius → one fruit
-        if max_spread < max_r_keep * 2.5:
+        # v7 FIX: tightened from 2.5x to 1.2x.
+        # 2.5x was merging 5 separate clustered fruits into 1.
+        # 1.2x only merges genuine shadow/highlight fragments of the same fruit.
+        if max_spread < max_r_keep * 1.2:
             all_pts = np.vstack([b['cnt'] for b in keep])
             hull    = cv2.convexHull(all_pts)
             single  = np.zeros(mask.shape, dtype=np.uint8)
@@ -439,10 +441,11 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # FIX v6: use the GLOBAL max_r across all kept blobs for merge radius
-    # (not per-pair max_r), so tiny shadow fragments still get absorbed
+    # v7 FIX: tightened from 3.0x to 1.2x.
+    # 3.0x was merging separate nearby fruits into one group.
+    # 1.2x only catches genuine tiny fragments of the same fruit.
     global_max_r = max(b['r'] for b in keep)
-    MERGE_RADIUS = max(global_max_r * 3.0, 60.0)
+    MERGE_RADIUS = max(global_max_r * 1.2, 12.0)
 
     for i in range(len(keep)):
         for j in range(i + 1, len(keep)):
