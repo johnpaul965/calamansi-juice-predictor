@@ -404,37 +404,55 @@ def get_ripeness(all_features):
         return "🟢 Green Stage",   "#16a34a", "Dark green — unripe calamansi."
 
 def _direct_color_detect(img_blur, ppc=41.0):
+    """
+    Fallback: pure HSV color segmentation ignoring edges.
+    Wider ranges + lower thresholds to catch dark olive-green calamansi
+    on busy backgrounds (lined notebook, etc.)
+    """
     hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
-    mask_green  = cv2.inRange(hsv, np.array([20, 10,  10]), np.array([90, 255, 255]))
-    mask_yellow = cv2.inRange(hsv, np.array([10, 10,  10]), np.array([35, 255, 255]))
-    mask_dark   = cv2.inRange(hsv, np.array([20, 10,   5]), np.array([110, 180,  80]))
+
+    # Wide green range — catches bright, dark, and olive-green calamansi
+    mask_green = cv2.inRange(hsv, np.array([15, 5, 10]), np.array([100, 255, 255]))
+    # Yellow-ripe range
+    mask_yellow = cv2.inRange(hsv, np.array([10, 5, 10]), np.array([35, 255, 255]))
+    # Specific olive-dark range (dark unripe on bright BG)
+    mask_olive  = cv2.inRange(hsv, np.array([20, 15, 15]), np.array([80, 200, 130]))
+
     mask = cv2.bitwise_or(mask_green, mask_yellow)
-    mask = cv2.bitwise_or(mask, mask_dark)
-    k = np.ones((9, 9), np.uint8)
+    mask = cv2.bitwise_or(mask, mask_olive)
+
+    # Remove near-white and near-gray pixels (paper/notebook lines)
+    # These have very low saturation — exclude them explicitly
+    low_sat = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 18, 255]))
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(low_sat))
+
+    k = np.ones((7, 7), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((5, 5), np.uint8))
+
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts    = sorted(cnts, key=cv2.contourArea, reverse=True)
+
     feats, result_cnts = [], []
     for cnt in cnts[:10]:
-        if cv2.contourArea(cnt) < 80:
+        if cv2.contourArea(cnt) < 50:
             continue
         peri = cv2.arcLength(cnt, True)
         if peri == 0:
             continue
         circ = (4 * np.pi * cv2.contourArea(cnt)) / (peri ** 2)
-        if circ < 0.10:
+        if circ < 0.05:
             continue
         (_, _), r = cv2.minEnclosingCircle(cnt)
         d_cm = (2 * r) / ppc
-        if not (1.0 <= d_cm <= 9.0):
+        if not (0.5 <= d_cm <= 9.0):
             continue
         f = compute_features(cnt, mask, hsv, ppc)
         if f:
             feats.append(f)
             result_cnts.append(cnt)
-    return feats, result_cnts
 
+    return feats, result_cnts
 
 def detect_on_frame(img_rgb):
     img_blur  = preprocess_array(img_rgb)
