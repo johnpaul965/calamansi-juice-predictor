@@ -56,8 +56,6 @@ def preprocess_image(image_path):
 
 def preprocess_array(image_array):
     cropped = _square_crop(image_array)
-    h, w = cropped.shape[:2]
-    cropped = cropped[:, int(w * 0.10):]
     return cv2.GaussianBlur(
         cv2.resize(cropped, (512, 512)),
         (5, 5), 0)
@@ -557,8 +555,16 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
 def calibrate_ppc(hough_circles, scale=1.0):
     if not hough_circles:
         return PIXELS_PER_CM * scale
-    avg_r_px = np.mean([r for _, _, r in hough_circles])
-    return max(avg_r_px / 1.25, 5.0)
+    default_ppc = PIXELS_PER_CM * scale
+    # Only use circles that look like real fruit at default ppc
+    plausible = [r for _, _, r in hough_circles
+                 if MIN_DIAMETER_CM <= (2 * r) / default_ppc <= MAX_DIAMETER_CM]
+    if not plausible:
+        return default_ppc  # all circles are noise-sized — don't corrupt ppc
+    avg_r_px = float(np.mean(plausible))
+    calibrated = max(avg_r_px / 1.25, 5.0)
+    # Don't drift more than 3x from default
+    return float(np.clip(calibrated, default_ppc / 3.0, default_ppc * 3.0))
 
 
 def get_features_from_hough(img_blur, circles, ppc):
