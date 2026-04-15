@@ -343,6 +343,43 @@ def _nms_circles(circles, iou_thresh=0.5):
             kept.append((cx, cy, cr))
     return kept
 
+def _split_large_blob(cnt, img_blur, hsv, ppc):
+    """Split a blob too large for one fruit into individual fruits via Hough circles."""
+    x, y, w, h = cv2.boundingRect(cnt)
+    pad = 10
+    x1 = max(0, x - pad); y1 = max(0, y - pad)
+    x2 = min(img_blur.shape[1], x + w + pad)
+    y2 = min(img_blur.shape[0], y + h + pad)
+
+    roi      = img_blur[y1:y2, x1:x2]
+    roi_gray = cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY), (5, 5), 0)
+
+    min_r = max(5, int((MIN_DIAMETER_CM / 2) * ppc * 0.6))
+    max_r = int((MAX_DIAMETER_CM / 2) * ppc * 1.2)
+
+    circles = cv2.HoughCircles(
+        roi_gray, cv2.HOUGH_GRADIENT, dp=1.2,
+        minDist=int(MIN_DIAMETER_CM * ppc * 0.7),
+        param1=50, param2=18,
+        minRadius=min_r, maxRadius=max_r
+    )
+    if circles is None:
+        return None
+
+    circles = np.round(circles[0]).astype(int)
+    feats, cnts = [], []
+    for (cx, cy, r) in circles:
+        abs_cx = cx + x1; abs_cy = cy + y1
+        mask_c = np.zeros(img_blur.shape[:2], dtype=np.uint8)
+        cv2.circle(mask_c, (abs_cx, abs_cy), r, 255, -1)
+        theta = np.linspace(0, 2 * np.pi, 36)
+        pts   = np.array([[int(abs_cx + r * np.cos(t)),
+                           int(abs_cy + r * np.sin(t))] for t in theta], dtype=np.int32)
+        c_cnt = pts.reshape((-1, 1, 2))
+        f = compute_features(c_cnt, mask_c, hsv, ppc)
+        if f:
+            feats.append(f); cnts.append(c_cnt)
+    return (feats, cnts) if feats else None
 
 def get_fruit_features(img_blur, mask, hsv, ppc):
     gray = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
@@ -374,7 +411,7 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
                           'cx': cx, 'cy': cy, 'r': r,
                           'fruit_score': fruit_score,
                           'mean_hue': mean_hue, 'mean_sat': mean_sat})
-
+    
     if not blob_info:
         return [], []
 
@@ -481,7 +518,25 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
         feats       = [f for i, f in enumerate(feats)       if i not in dominated]
         result_cnts = [c for i, c in enumerate(result_cnts) if i not in dominated]
 
-    return feats, result_cnts
+    # ── Split any blob that is too large for a single fruit ──────────────
+    expected_area = np.pi * ((MIN_DIAMETER_CM / 2) * ppc) ** 2
+    final_feats, final_cnts = [], []
+
+    for f, cnt in zip(feats, result_cnts):
+        blob_area = cv2.contourArea(cnt)
+
+        if blob_area > expected_area * 2.0:
+            split = _split_large_blob(cnt, img_blur, hsv, ppc)
+
+            if split and len(split[0]) > 1:
+                final_feats.extend(split[0])
+                final_cnts.extend(split[1])
+                continue
+
+        final_feats.append(f)
+        final_cnts.append(cnt)
+
+    return final_feats, final_cnts
 
 
 def calibrate_ppc(hough_circles, scale=1.0):
