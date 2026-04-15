@@ -35,8 +35,8 @@ MIN_COVERAGE = 0.003
 MIN_OVERLAP  = 0.40  # FIX: relaxed from 0.50 → 0.40; dark fruits on bright BG may not fully overlap mask
 
 MAX_FRUIT_COVERAGE = 0.65  # FIX: relaxed from 0.55 → 0.65 to allow many fruits
-MIN_BG_MEAN        = 55    # FIX: slight relax
-MAX_BG_STD         = 90    # FIX: raised from 75 → 90; bright/glary backgrounds have higher std
+MIN_BG_MEAN        = 40    # FIX: slight relax
+MAX_BG_STD         = 120    # FIX: raised from 75 → 90; bright/glary backgrounds have higher std
 
 
 def _square_crop(image_array):
@@ -72,7 +72,7 @@ def _brightness_contrast_mask(img_blur):
     bg_mean = float(np.mean(gray))
     bg_std  = float(np.std(gray))
 
-    if bg_mean < 100 or bg_std > 80:   # FIX: raised std threshold 60→80 for glary bright backgrounds
+    if bg_mean < 60:   # FIX: raised std threshold 60→80 for glary bright backgrounds
         return None
 
     dark_thresh = max(0, int(bg_mean - max(bg_std * 1.5, 25)))
