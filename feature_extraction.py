@@ -151,7 +151,7 @@ def _merge_overlapping_mask_blobs(mask, img_blur=None):
             gap_x     = max(0, max(xi, xj) - min(xi + wi, xj + wj))
             gap_y     = max(0, max(yi, yj) - min(yi + hi, yj + hj))
             pair_r    = min(circles_r[i], circles_r[j])
-            PROXIMITY = max(8, int(pair_r * 0.5))
+            PROXIMITY = max(2, int(pair_r * 0.08))
             if gap_x <= PROXIMITY and gap_y <= PROXIMITY:
                 union(i, j)
 
