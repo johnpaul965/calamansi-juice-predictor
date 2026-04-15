@@ -10,7 +10,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from feature_extraction import extract_features_from_path, FEATURE_COLS
 
 # ─────────────────────────────────────────
-# LOAD & VALIDATE GROUND TRUTH
+# LOAD & VALIDATE GROUND TRUTH.
 # ─────────────────────────────────────────
 GT_FILE     = 'ground_truth.csv'
 IMG_DIR     = 'images'
