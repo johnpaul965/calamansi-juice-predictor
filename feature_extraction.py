@@ -531,23 +531,6 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
         feats       = [f for i, f in enumerate(feats)       if i not in dominated]
         result_cnts = [c for i, c in enumerate(result_cnts) if i not in dominated]
 
-    # ── 6. FINAL SAFETY: if all results overlap heavily → keep only largest ──
-    if len(result_cnts) > 1:
-        centers = []
-        for cnt in result_cnts:
-            (cx, cy), r = cv2.minEnclosingCircle(cnt)
-            centers.append((cx, cy, r))
-
-        xs = [c[0] for c in centers]
-        ys = [c[1] for c in centers]
-        spread   = np.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
-        max_r_f  = max(c[2] for c in centers)
-
-        if spread < max_r_f * 2.0:
-            best_i     = max(range(len(result_cnts)),
-                             key=lambda i: cv2.contourArea(result_cnts[i]))
-            feats       = [feats[best_i]]
-            result_cnts = [result_cnts[best_i]]
 
     return feats, result_cnts
 
@@ -757,3 +740,5 @@ def process_video_frames(frames_rgb):
         'hough_circles':  circles,
         'fruit_count':    len(all_features),
     }
+
+# ── 6. FINAL SAFETY: if all results overlap heavily → keep only largest ──
