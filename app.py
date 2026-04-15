@@ -21,7 +21,7 @@ from feature_extraction import preprocess_array, segment_fruit, get_fruit_featur
     calibrate_ppc, count_hough, FEATURE_COLS
 
 st.set_page_config(
-    page_title="Calamansi Juice Yield Prediction System",
+    page_title="Calamansi Juice Yield Prediction System...",
     page_icon="🍋",
     layout="wide"
 )
