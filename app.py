@@ -18,7 +18,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import cross_val_score, KFold
 
 from feature_extraction import preprocess_array, segment_fruit, get_fruit_features, \
-    calibrate_ppc, count_hough, FEATURE_COLS
+    calibrate_ppc, count_hough, compute_features, FEATURE_COLS
 
 st.set_page_config(
     page_title="Calamansi Juice Yield Prediction System...",
@@ -403,15 +403,49 @@ def get_ripeness(all_features):
     else:
         return "🟢 Green Stage",   "#16a34a", "Dark green — unripe calamansi."
 
+def _direct_color_detect(img_blur, ppc=41.0):
+    hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+    mask_green  = cv2.inRange(hsv, np.array([20, 10,  10]), np.array([90, 255, 255]))
+    mask_yellow = cv2.inRange(hsv, np.array([10, 10,  10]), np.array([35, 255, 255]))
+    mask_dark   = cv2.inRange(hsv, np.array([20, 10,   5]), np.array([110, 180,  80]))
+    mask = cv2.bitwise_or(mask_green, mask_yellow)
+    mask = cv2.bitwise_or(mask, mask_dark)
+    k = np.ones((9, 9), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts    = sorted(cnts, key=cv2.contourArea, reverse=True)
+    feats, result_cnts = [], []
+    for cnt in cnts[:10]:
+        if cv2.contourArea(cnt) < 80:
+            continue
+        peri = cv2.arcLength(cnt, True)
+        if peri == 0:
+            continue
+        circ = (4 * np.pi * cv2.contourArea(cnt)) / (peri ** 2)
+        if circ < 0.10:
+            continue
+        (_, _), r = cv2.minEnclosingCircle(cnt)
+        d_cm = (2 * r) / ppc
+        if not (1.0 <= d_cm <= 9.0):
+            continue
+        f = compute_features(cnt, mask, hsv, ppc)
+        if f:
+            feats.append(f)
+            result_cnts.append(cnt)
+    return feats, result_cnts
+
 
 def detect_on_frame(img_rgb):
-    img_blur          = preprocess_array(img_rgb)
-    mask, hsv         = segment_fruit(img_blur)
-    circles           = count_hough(img_blur, mask)
-    ppc               = calibrate_ppc(circles) if circles else 41.0
-
-    # ── FIX: always use get_fruit_features (removed get_features_from_hough bypass) ──
+    img_blur  = preprocess_array(img_rgb)
+    mask, hsv = segment_fruit(img_blur)
+    circles   = count_hough(img_blur, mask)
+    ppc       = calibrate_ppc(circles) if circles else 41.0
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
+
+    # Fallback: if main pipeline detects nothing, try direct color-only approach
+    if not all_features:
+        all_features, valid_cnts = _direct_color_detect(img_blur, ppc)
 
     annotated = img_blur.copy()
     for i, cnt in enumerate(valid_cnts):
@@ -422,7 +456,6 @@ def detect_on_frame(img_rgb):
         cv2.putText(annotated, f"#{i+1}", (x+4, y+20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (22, 163, 74), 2)
     return all_features, valid_cnts, annotated
-
 
 def show_juice_recommendations(total_ml, ripeness_label):
     st.markdown('<div class="section-header">🍹 Juice Usage Recommendations</div>', unsafe_allow_html=True)
