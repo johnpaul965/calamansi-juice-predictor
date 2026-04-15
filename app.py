@@ -405,31 +405,46 @@ def get_ripeness(all_features):
 
 def _direct_color_detect(img_blur, ppc=41.0):
     """
-    Fallback: pure HSV color segmentation targeting calamansi green only.
-    High saturation floor ensures only genuinely green objects pass.
+    Fallback: HSV color mask + watershed to separate touching fruits.
     """
     hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
 
-    # Calamansi green: hue 22–85, saturation MUST be strong (>=40)
-    # This excludes: gray cardboard (low sat), black objects (low val), notebook (low sat)
     mask = cv2.inRange(hsv, np.array([22, 40, 30]), np.array([85, 255, 210]))
 
-    k = np.ones((9, 9), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((7, 7), np.uint8))
+    # Small morph — fill holes but do NOT bridge gaps between separate fruits
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
 
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts    = sorted(cnts, key=cv2.contourArea, reverse=True)
+    # Distance transform — peaks = fruit centers
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    if dist.max() == 0:
+        return [], []
+    _, sure_fg = cv2.threshold(dist, 0.35 * dist.max(), 255, 0)
+    sure_fg  = np.uint8(sure_fg)
+    sure_bg  = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=2)
+    unknown  = cv2.subtract(sure_bg, sure_fg)
+
+    # Watershed markers
+    _, markers = cv2.connectedComponents(sure_fg)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+    img_bgr = cv2.cvtColor(img_blur, cv2.COLOR_RGB2BGR)
+    markers = cv2.watershed(img_bgr, markers)
 
     feats, result_cnts = [], []
-    for cnt in cnts[:10]:
-        if cv2.contourArea(cnt) < 150:
+    for label in range(2, int(markers.max()) + 1):
+        component = np.uint8(markers == label) * 255
+        cnts, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        cnt = max(cnts, key=cv2.contourArea)
+        if cv2.contourArea(cnt) < 100:
             continue
         peri = cv2.arcLength(cnt, True)
         if peri == 0:
             continue
         circ = (4 * np.pi * cv2.contourArea(cnt)) / (peri ** 2)
-        if circ < 0.15:
+        if circ < 0.10:
             continue
         (_, _), r = cv2.minEnclosingCircle(cnt)
         d_cm = (2 * r) / ppc
@@ -441,10 +456,6 @@ def _direct_color_detect(img_blur, ppc=41.0):
             result_cnts.append(cnt)
 
     return feats, result_cnts
-
-
-_frame_skip_counter = 0
-_cached_result = ([], [], None)
 
 def detect_on_frame(img_rgb):
     global _frame_skip_counter, _cached_result
