@@ -6,7 +6,7 @@ import numpy as np
 # Calamansi Juice Yield Prediction System
 # VERSION: v6-single-fruit-fix
 # ─────────────────────────────────────────
-VERSION = "v7-multi-fruit-fix"
+VERSION = "v8-dark-fruit-fix"
 print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
@@ -19,19 +19,22 @@ FEATURE_COLS = [
     'estimated_volume_cm3', 'mean_hue', 'mean_saturation', 'mean_value'
 ]
 
-HSV_GREEN_LO = np.array([25, 30, 15])
-HSV_GREEN_HI = np.array([100, 255, 210])
-HSV_RIPE_LO  = np.array([10, 35, 35])
-HSV_RIPE_HI  = np.array([40, 255, 255])
+HSV_GREEN_LO  = np.array([25, 15, 10])   # FIX: lowered S from 30→15, V from 15→10 for dark/unripe fruit
+HSV_GREEN_HI  = np.array([100, 255, 220])
+HSV_RIPE_LO   = np.array([10, 20, 20])   # FIX: lowered S from 35→20, V from 35→20 for dark ripe fruit
+HSV_RIPE_HI   = np.array([40, 255, 255])
+# Extra HSV range for very dark (near-black) unripe calamansi on bright backgrounds
+HSV_DARK_LO   = np.array([20, 10, 5])
+HSV_DARK_HI   = np.array([110, 180, 80])
 
-MIN_AVG_SAT  = 25
-MIN_SAT_VAL  = 25
+MIN_AVG_SAT  = 12   # FIX: lowered from 25 → 12; very dark/unripe calamansi have low saturation
+MIN_SAT_VAL  = 12   # FIX: lowered from 25 → 12
 MIN_COVERAGE = 0.003
-MIN_OVERLAP  = 0.50
+MIN_OVERLAP  = 0.40  # FIX: relaxed from 0.50 → 0.40; dark fruits on bright BG may not fully overlap mask
 
-MAX_FRUIT_COVERAGE = 0.55
-MIN_BG_MEAN        = 60
-MAX_BG_STD         = 75
+MAX_FRUIT_COVERAGE = 0.65  # FIX: relaxed from 0.55 → 0.65 to allow many fruits
+MIN_BG_MEAN        = 55    # FIX: slight relax
+MAX_BG_STD         = 90    # FIX: raised from 75 → 90; bright/glary backgrounds have higher std
 
 
 def _square_crop(image_array):
@@ -69,7 +72,7 @@ def _brightness_contrast_mask(img_blur):
     bg_mean = float(np.mean(gray))
     bg_std  = float(np.std(gray))
 
-    if bg_mean < 100 or bg_std > 60:
+    if bg_mean < 100 or bg_std > 80:   # FIX: raised std threshold 60→80 for glary bright backgrounds
         return None
 
     dark_thresh = max(0, int(bg_mean - max(bg_std * 1.5, 25)))
@@ -91,7 +94,9 @@ def _brightness_contrast_mask(img_blur):
     # which was being rejected by the old hardcoded threshold of 100.
     gray_s   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     bg_mean  = float(np.mean(gray_s))
-    bright_cutoff = bg_mean * 0.80
+    # FIX: on a very bright BG, dark fruits (~60-100 brightness) have mean < bg_mean*0.80
+    # but that cutoff was too aggressive — raise to bg_mean*0.90 so dark fruits survive.
+    bright_cutoff = bg_mean * 0.90
     cnts_s, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt_s in cnts_s:
         tmp = np.zeros_like(mask)
@@ -195,7 +200,9 @@ def segment_fruit(img_blur, scale=1.0):
     hsv   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
     mask1 = cv2.inRange(hsv, HSV_GREEN_LO, HSV_GREEN_HI)
     mask2 = cv2.inRange(hsv, HSV_RIPE_LO,  HSV_RIPE_HI)
+    mask3 = cv2.inRange(hsv, HSV_DARK_LO,  HSV_DARK_HI)   # FIX: capture very dark/unripe fruits
     hsv_mask = cv2.bitwise_or(mask1, mask2)
+    hsv_mask = cv2.bitwise_or(hsv_mask, mask3)
     k        = np.ones((3, 3), np.uint8)
     hsv_mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_CLOSE, k)
     hsv_mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_OPEN,  k)
@@ -295,6 +302,8 @@ def _has_fruit_color(hsv, mask_region):
         return False
     avg_sat = np.mean(px[:, 1])
     avg_val = np.mean(px[:, 2])
+    # FIX: very dark/unripe calamansi can have avg_sat as low as 10-15 and avg_val < 80.
+    # Old threshold of 25 was discarding valid dark fruits.
     if avg_sat < MIN_AVG_SAT:
         return False
     if avg_val > 240:
@@ -595,7 +604,10 @@ def count_hough(img_blur, mask, scale=1.0):
         return []
 
     mean_v        = float(gray.mean())
-    bright_thresh = min(int(mean_v - 15), 200)
+    # FIX: dark fruits on bright BG have dark centers; raise threshold so we don't skip them.
+    # Old: mean_v - 15 would be ~150 on a bright BG, rejecting fruit centers at ~60-80.
+    # New: use 85th percentile of image brightness so we only skip true highlights.
+    bright_thresh = min(int(np.percentile(gray, 85)), 210)
 
     min_r = max(5,   int(8  * scale))
     max_r = min(150, int(80 * scale))
