@@ -497,8 +497,7 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
 
         single = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(single, [cnt], -1, 255, -1)
-        if not _has_fruit_color(hsv, single):
-            continue
+
 
         f = compute_features(cnt, mask, hsv, ppc)
         if f:
@@ -669,7 +668,7 @@ def extract_features_from_path(image_path):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     valid = [c for c in contours if is_calamansi(c, PIXELS_PER_CM)]
     if not valid:
-        valid = [c for c in contours if cv2.contourArea(c) >= 100]
+        valid = [c for c in contours if cv2.contourArea(c) >= 50]
     if not valid:
         return None
     return compute_features(max(valid, key=cv2.contourArea), mask, hsv, PIXELS_PER_CM)
@@ -739,5 +738,3 @@ def process_video_frames(frames_rgb):
         'hough_circles':  circles,
         'fruit_count':    len(all_features),
     }
-
-# ── 6. FINAL SAFETY: if all results overlap heavily → keep only largest ──
