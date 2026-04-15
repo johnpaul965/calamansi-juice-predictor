@@ -13,6 +13,8 @@ PIXELS_PER_CM   = 41.0
 MIN_CIRCULARITY = 0.20   # was 0.40
 MIN_AVG_SAT     = 5      # was 12
 MIN_COVERAGE    = 0.001  # was 0.003
+MIN_DIAMETER_CM = 1.5   # adjust if needed
+MAX_DIAMETER_CM = 7.0   # your expected max calamansi size
 
 FEATURE_COLS = [
     'area_cm2', 'diameter_cm', 'perimeter_cm', 'circularity',

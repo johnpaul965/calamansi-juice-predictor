@@ -496,16 +496,16 @@ def show_results(all_features, predictions, show_recommendations=False):
 
     st.markdown(f"""
     <div class="total-box">
-        <span style="font-size:16px;color:#bbf7d0;">🍋 {fruit_count} Calamansi Fruits Detected</span><br>
+        <span style="font-size:16px;color:#bbf7d0;">🍋 {fruit_count} Calamansi  Detected</span><br>
         <span style="font-size:40px;font-weight:bold;color:#ffffff;">💧 {total_juice:.2f} mL</span><br>
         <span style="font-size:14px;color:#bbf7d0;">Estimated Total Juice Yield</span>
     </div>
     """, unsafe_allow_html=True)
 
     st.divider()
-    st.markdown('<div class="section-header">🍋 Per Fruit Breakdown</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">🍋 Per Calamansi Breakdown</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame({
-        "Fruit":               [f"#{i+1}" for i in range(fruit_count)],
+        "Calamansi":               [f"#{i+1}" for i in range(fruit_count)],
         "Predicted Juice (mL)":[f"{p:.2f}" for p in predictions],
         "Diameter (cm)":       [f"{all_features[i]['diameter_cm']:.2f}" for i in range(fruit_count)],
         "Area (cm²)":          [f"{all_features[i]['area_cm2']:.2f}" for i in range(fruit_count)],
@@ -518,8 +518,8 @@ def show_results(all_features, predictions, show_recommendations=False):
     fig, ax = plt.subplots(figsize=(max(6, fruit_count*0.7), 4))
     bars = ax.bar([f"#{i+1}" for i in range(fruit_count)], predictions, color='#16a34a', edgecolor='white')
     ax.axhline(avg_juice, color='red', linestyle='--', lw=1.5, label=f'Avg = {avg_juice:.2f} mL')
-    ax.set_xlabel('Fruit'); ax.set_ylabel('Predicted Juice (mL)')
-    ax.set_title(f'{fruit_count} fruits | Total: {total_juice:.2f} mL')
+    ax.set_xlabel('Calamansi'); ax.set_ylabel('Predicted Juice (mL)')
+    ax.set_title(f'{fruit_count} Calamansi | Total: {total_juice:.2f} mL')
     ax.legend()
     for bar, val in zip(bars, predictions):
         ax.text(bar.get_x()+bar.get_width()/2, val+0.05, f'{val:.2f}', ha='center', fontsize=9)
@@ -677,7 +677,7 @@ elif page == "🔍 Predict Juice Yield":
                 st.success(f"✅ {len(features)} calamansi detected! Saved as record #{pred_id}.")
 
                 if annotated is not None:
-                    st.image(annotated, caption=f"Captured — {len(features)} fruits detected",
+                    st.image(annotated, caption=f"Captured — {len(features)} calamansi detected",
                              use_container_width=True)
                 show_results(features, predictions, show_recommendations=True)
     else:
