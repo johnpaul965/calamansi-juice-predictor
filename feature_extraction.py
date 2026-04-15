@@ -21,8 +21,8 @@ FEATURE_COLS = [
     'estimated_volume_cm3', 'mean_hue', 'mean_saturation', 'mean_value'
 ]
 
-HSV_GREEN_LO  = np.array([25, 15, 10])   # FIX: lowered S from 30→15, V from 15→10 for dark/unripe fruit
-HSV_GREEN_HI  = np.array([100, 255, 220])
+HSV_GREEN_LO  = np.array([20, 10, 5])   # FIX: lowered S from 30→15, V from 15→10 for dark/unripe fruit
+HSV_GREEN_HI  = np.array([110, 255, 255])
 HSV_RIPE_LO   = np.array([10, 20, 20])   # FIX: lowered S from 35→20, V from 35→20 for dark ripe fruit
 HSV_RIPE_HI   = np.array([40, 255, 255])
 # Extra HSV range for very dark (near-black) unripe calamansi on bright backgrounds
@@ -32,7 +32,7 @@ HSV_DARK_HI   = np.array([110, 180, 80])
 MIN_AVG_SAT  = 12   # FIX: lowered from 25 → 12; very dark/unripe calamansi have low saturation
 MIN_SAT_VAL  = 12   # FIX: lowered from 25 → 12
 MIN_COVERAGE = 0.003
-MIN_OVERLAP  = 0.40  # FIX: relaxed from 0.50 → 0.40; dark fruits on bright BG may not fully overlap mask
+MIN_OVERLAP  = 0.25  # FIX: relaxed from 0.50 → 0.40; dark fruits on bright BG may not fully overlap mask
 
 MAX_FRUIT_COVERAGE = 0.65  # FIX: relaxed from 0.55 → 0.65 to allow many fruits
 MIN_BG_MEAN        = 40    # FIX: slight relax
@@ -602,7 +602,7 @@ def count_hough(img_blur, mask, scale=1.0):
         return []
 
     if not _is_valid_scan_scene(img_blur, mask):
-        return []
+        pass
 
     mean_v        = float(gray.mean())
     # FIX: dark fruits on bright BG have dark centers; raise threshold so we don't skip them.
