@@ -6,7 +6,7 @@ import numpy as np
 # Calamansi Juice Yield Prediction System
 # VERSION: v6-single-fruit-fix
 # ─────────────────────────────────────────
-VERSION = "v8-dark-fruit-fix"
+VERSION = "v9-cluster-and-skin-fix"
 print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
@@ -243,8 +243,20 @@ def _is_valid_scan_scene(img_blur, mask):
         bg_std  = float(np.std(bg_pixels))
         if bg_mean < MIN_BG_MEAN:
             return False
-        if bg_std > MAX_BG_STD:
-            return False
+
+        # v9 FIX: skin-tone backgrounds have high std (variance from fingers,
+        # shadows, knuckles) but are still valid scan scenes. Detect skin by
+        # checking if the background HSV hue is in the skin range (0–25) with
+        # moderate saturation. If it is, skip the std check — skin is OK.
+        hsv_bg = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
+        bg_hsv_pixels = hsv_bg.reshape(-1, 3)[bg_mask.flatten() > 0]
+        if len(bg_hsv_pixels) > 0:
+            bg_hue  = float(np.median(bg_hsv_pixels[:, 0]))
+            bg_sat  = float(np.median(bg_hsv_pixels[:, 1]))
+            is_skin = (bg_hue <= 25) and (bg_sat >= 40)
+            is_neutral_bg = (bg_std <= MAX_BG_STD)  # plain white/blue/paper
+            if not is_skin and not is_neutral_bg:
+                return False
 
     return True
 
@@ -424,10 +436,11 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
             np.sqrt((b['cx'] - centroid_x)**2 + (b['cy'] - centroid_y)**2)
             for b in keep
         )
-        # v7 FIX: tightened from 2.5x to 1.2x.
-        # 2.5x was collapsing 5 separate clustered fruits into 1.
-        # 1.2x only merges genuine shadow/highlight fragments of one fruit.
-        if max_spread < max_r_keep * 1.2:
+        # v9 FIX: tightened from 1.2x to 0.6x.
+        # 1.2x still fired for tightly-clustered separate fruits.
+        # 0.6x means all blobs must fit within 0.6× the largest blob's radius —
+        # only genuine shadow/highlight fragments of a single fruit qualify.
+        if max_spread < max_r_keep * 0.6:
             all_pts = np.vstack([b['cnt'] for b in keep])
             hull    = cv2.convexHull(all_pts)
             single  = np.zeros(mask.shape, dtype=np.uint8)
@@ -456,16 +469,15 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # v7 FIX: tightened from 3.0x/60px floor to 1.2x/12px floor.
-    # 3.0x was merging separate nearby fruits into one group.
-    global_max_r = max(b['r'] for b in keep)
-    MERGE_RADIUS = max(global_max_r * 1.2, 12.0)
-
+    # v9 FIX: per-pair radius-based proximity so tightly-packed separate fruits
+    # are not merged. Only merge if the gap is < 0.4 × the SMALLER blob's radius
+    # (i.e. a tiny fragment is very close to a large blob it belongs to).
     for i in range(len(keep)):
         for j in range(i + 1, len(keep)):
             bi, bj = keep[i], keep[j]
             dist   = np.sqrt((bi['cx'] - bj['cx'])**2 + (bi['cy'] - bj['cy'])**2)
-            if dist < MERGE_RADIUS:
+            merge_r = max(min(bi['r'], bj['r']) * 0.4, 8.0)
+            if dist < merge_r:
                 union(i, j)
 
     groups = {}
@@ -650,7 +662,10 @@ def count_hough(img_blur, mask, scale=1.0):
 
         valid.append((x, y, r))
 
-    return _nms_circles(valid, iou_thresh=0.5)
+    # FIX v9: 0.5 collapses closely-clustered fruits (dist < r1+r2 * 0.5 fires
+    # when fruits merely touch). 0.35 requires >35% of combined radius overlap,
+    # i.e. genuine intersection rather than adjacency.
+    return _nms_circles(valid, iou_thresh=0.35)
 
 
 # ─────────────────────────────────────────
