@@ -405,26 +405,19 @@ def get_ripeness(all_features):
 
 def _direct_color_detect(img_blur, ppc=41.0):
     """
-    Fallback: pure HSV color segmentation ignoring edges.
-    Wider ranges + lower thresholds to catch dark olive-green calamansi
-    on busy backgrounds (lined notebook, etc.)
+    Fallback: pure HSV color segmentation targeting calamansi green only.
+    Deliberately excludes orange/brown hues that cause false positives.
     """
     hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
 
-    # Wide green range — catches bright, dark, and olive-green calamansi
-    mask_green = cv2.inRange(hsv, np.array([15, 5, 10]), np.array([100, 255, 255]))
-    # Yellow-ripe range
-    mask_yellow = cv2.inRange(hsv, np.array([10, 5, 10]), np.array([35, 255, 255]))
-    # Specific olive-dark range (dark unripe on bright BG)
-    mask_olive  = cv2.inRange(hsv, np.array([20, 15, 15]), np.array([80, 200, 130]))
+    # Target ONLY green — calamansi range (olive-dark-green to bright green)
+    # Hue 22–90 covers all green stages of calamansi
+    # Exclude yellow-orange (H<22) to avoid detecting orange/brown objects
+    mask_green = cv2.inRange(hsv, np.array([22, 25, 15]), np.array([90, 255, 220]))
 
-    mask = cv2.bitwise_or(mask_green, mask_yellow)
-    mask = cv2.bitwise_or(mask, mask_olive)
-
-    # Remove near-white and near-gray pixels (paper/notebook lines)
-    # These have very low saturation — exclude them explicitly
-    low_sat = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 18, 255]))
-    mask = cv2.bitwise_and(mask, cv2.bitwise_not(low_sat))
+    # Exclude near-white and near-gray (notebook paper, shadows)
+    low_sat_or_bright = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 20, 255]))
+    mask = cv2.bitwise_and(mask_green, cv2.bitwise_not(low_sat_or_bright))
 
     k = np.ones((7, 7), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
@@ -441,7 +434,7 @@ def _direct_color_detect(img_blur, ppc=41.0):
         if peri == 0:
             continue
         circ = (4 * np.pi * cv2.contourArea(cnt)) / (peri ** 2)
-        if circ < 0.05:
+        if circ < 0.08:
             continue
         (_, _), r = cv2.minEnclosingCircle(cnt)
         d_cm = (2 * r) / ppc
