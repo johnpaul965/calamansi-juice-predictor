@@ -437,13 +437,6 @@ def _direct_color_detect(img_blur, ppc=41.0):
     return feats, result_cnts
 
 def detect_on_frame(img_rgb):
-    global _frame_skip_counter, _cached_result
-
-    # Process every 3rd frame to reduce lag on mobile LTE
-    _frame_skip_counter += 1
-    if _frame_skip_counter % 3 != 0 and _cached_result[2] is not None:
-        return _cached_result
-
     img_blur  = preprocess_array(img_rgb)
     mask, hsv = segment_fruit(img_blur)
     circles   = count_hough(img_blur, mask)
@@ -462,8 +455,6 @@ def detect_on_frame(img_rgb):
         cv2.rectangle(annotated, (x, y), (x+w, y+h), (22, 163, 74), 2)
         cv2.putText(annotated, f"#{i+1}", (x+4, y+20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (22, 163, 74), 2)
-
-    _cached_result = (all_features, valid_cnts, annotated)
     return all_features, valid_cnts, annotated
 
 def show_juice_recommendations(total_ml, ripeness_label):
