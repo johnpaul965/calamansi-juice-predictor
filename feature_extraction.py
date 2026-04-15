@@ -11,7 +11,7 @@ print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
 MIN_CIRCULARITY = 0.40
-MIN_DIAMETER_CM = 1.5
+MIN_DIAMETER_CM = 1.0
 MAX_DIAMETER_CM = 7.0
 
 FEATURE_COLS = [
@@ -80,18 +80,24 @@ def _brightness_contrast_mask(img_blur):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k_open)
 
-    # Shadow suppression
-    mask = cv2.erode(mask,  np.ones((11, 11), np.uint8), iterations=2)
-    mask = cv2.dilate(mask, np.ones((7,  7),  np.uint8), iterations=2)
+    # v7 FIX: reduced from 11x11 x2 → 5x5 x1.
+    # 11x11 erosion was completely destroying small calamansi blobs (~30px radius).
+    mask = cv2.erode(mask,  np.ones((5, 5), np.uint8), iterations=1)
+    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
 
-    # Remove blobs whose mean brightness is too high (shadows are lighter)
+    # Remove blobs whose mean brightness is too high (shadows/highlights are brighter)
+    # v7 FIX: use dynamic bg_mean*0.80 instead of hardcoded 100.
+    # Calamansi on a bright background can have mean brightness up to ~130,
+    # which was being rejected by the old hardcoded threshold of 100.
+    gray_s   = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
+    bg_mean  = float(np.mean(gray_s))
+    bright_cutoff = bg_mean * 0.80
     cnts_s, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    gray_s = cv2.cvtColor(img_blur, cv2.COLOR_RGB2GRAY)
     for cnt_s in cnts_s:
         tmp = np.zeros_like(mask)
         cv2.drawContours(tmp, [cnt_s], -1, 255, -1)
         mean_bright = float(np.mean(gray_s[tmp > 0]))
-        if mean_bright > 100:
+        if mean_bright > bright_cutoff:
             cv2.drawContours(mask, [cnt_s], -1, 0, -1)
 
     return mask
@@ -155,9 +161,9 @@ def _merge_overlapping_mask_blobs(mask, img_blur=None):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # v7 FIX: use per-pair average radius with a small gap allowance.
-    # Merges shadow/highlight fragments of the SAME fruit (gap < 0.5*r)
-    # but does NOT merge two separate fruits sitting next to each other.
+    # v7 FIX: per-pair radius-based proximity instead of a hard 60px floor.
+    # 60px was merging separate calamansi (~50px apart) into one blob.
+    # Now only merges fragments with gap < 0.5 × the smaller blob's radius.
     circles_r = [cv2.minEnclosingCircle(c)[1] for c in cnts]
 
     for i in range(len(rects)):
@@ -410,8 +416,8 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
             for b in keep
         )
         # v7 FIX: tightened from 2.5x to 1.2x.
-        # 2.5x was merging 5 separate clustered fruits into 1.
-        # 1.2x only merges genuine shadow/highlight fragments of the same fruit.
+        # 2.5x was collapsing 5 separate clustered fruits into 1.
+        # 1.2x only merges genuine shadow/highlight fragments of one fruit.
         if max_spread < max_r_keep * 1.2:
             all_pts = np.vstack([b['cnt'] for b in keep])
             hull    = cv2.convexHull(all_pts)
@@ -441,9 +447,8 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
     def union(i, j):
         parent[find(i)] = find(j)
 
-    # v7 FIX: tightened from 3.0x to 1.2x.
+    # v7 FIX: tightened from 3.0x/60px floor to 1.2x/12px floor.
     # 3.0x was merging separate nearby fruits into one group.
-    # 1.2x only catches genuine tiny fragments of the same fruit.
     global_max_r = max(b['r'] for b in keep)
     MERGE_RADIUS = max(global_max_r * 1.2, 12.0)
 
