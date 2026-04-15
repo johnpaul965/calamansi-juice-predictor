@@ -406,35 +406,30 @@ def get_ripeness(all_features):
 def _direct_color_detect(img_blur, ppc=41.0):
     """
     Fallback: pure HSV color segmentation targeting calamansi green only.
-    Deliberately excludes orange/brown hues that cause false positives.
+    High saturation floor ensures only genuinely green objects pass.
     """
     hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
 
-    # Target ONLY green — calamansi range (olive-dark-green to bright green)
-    # Hue 22–90 covers all green stages of calamansi
-    # Exclude yellow-orange (H<22) to avoid detecting orange/brown objects
-    mask_green = cv2.inRange(hsv, np.array([22, 25, 15]), np.array([90, 255, 220]))
+    # Calamansi green: hue 22–85, saturation MUST be strong (>=40)
+    # This excludes: gray cardboard (low sat), black objects (low val), notebook (low sat)
+    mask = cv2.inRange(hsv, np.array([22, 40, 30]), np.array([85, 255, 210]))
 
-    # Exclude near-white and near-gray (notebook paper, shadows)
-    low_sat_or_bright = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 20, 255]))
-    mask = cv2.bitwise_and(mask_green, cv2.bitwise_not(low_sat_or_bright))
-
-    k = np.ones((7, 7), np.uint8)
+    k = np.ones((9, 9), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((5, 5), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((7, 7), np.uint8))
 
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts    = sorted(cnts, key=cv2.contourArea, reverse=True)
 
     feats, result_cnts = [], []
     for cnt in cnts[:10]:
-        if cv2.contourArea(cnt) < 50:
+        if cv2.contourArea(cnt) < 150:
             continue
         peri = cv2.arcLength(cnt, True)
         if peri == 0:
             continue
         circ = (4 * np.pi * cv2.contourArea(cnt)) / (peri ** 2)
-        if circ < 0.08:
+        if circ < 0.15:
             continue
         (_, _), r = cv2.minEnclosingCircle(cnt)
         d_cm = (2 * r) / ppc
@@ -447,14 +442,25 @@ def _direct_color_detect(img_blur, ppc=41.0):
 
     return feats, result_cnts
 
+
+_frame_skip_counter = 0
+_cached_result = ([], [], None)
+
 def detect_on_frame(img_rgb):
+    global _frame_skip_counter, _cached_result
+
+    # Process every 3rd frame to reduce lag on mobile LTE
+    _frame_skip_counter += 1
+    if _frame_skip_counter % 3 != 0 and _cached_result[2] is not None:
+        return _cached_result
+
     img_blur  = preprocess_array(img_rgb)
     mask, hsv = segment_fruit(img_blur)
     circles   = count_hough(img_blur, mask)
     ppc       = calibrate_ppc(circles) if circles else 41.0
+
     all_features, valid_cnts = get_fruit_features(img_blur, mask, hsv, ppc)
 
-    # Fallback: if main pipeline detects nothing, try direct color-only approach
     if not all_features:
         all_features, valid_cnts = _direct_color_detect(img_blur, ppc)
 
@@ -466,6 +472,8 @@ def detect_on_frame(img_rgb):
         cv2.rectangle(annotated, (x, y), (x+w, y+h), (22, 163, 74), 2)
         cv2.putText(annotated, f"#{i+1}", (x+4, y+20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (22, 163, 74), 2)
+
+    _cached_result = (all_features, valid_cnts, annotated)
     return all_features, valid_cnts, annotated
 
 def show_juice_recommendations(total_ml, ripeness_label):
