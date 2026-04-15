@@ -244,7 +244,7 @@ init_db()
 # AUTH
 # ══════════════════════════════════════════════════════
 def show_auth():
-    st.markdown('<div class="main-title">🍋 Calamansi Juice Yield Prediction System</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">🍋 Calamansi Juice Yield Prediction System...</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Development of an Image-Based System for Predicting Calamansi (Citrus microcarpa) Juice Yield Using Linear Regression</div>', unsafe_allow_html=True)
     st.divider()
 
