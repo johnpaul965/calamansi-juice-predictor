@@ -10,9 +10,9 @@ VERSION = "v9-cluster-and-skin-fix"
 print(f"[feature_extraction] Loaded {VERSION}")
 
 PIXELS_PER_CM   = 41.0
-MIN_CIRCULARITY = 0.40
-MIN_DIAMETER_CM = 1.0
-MAX_DIAMETER_CM = 7.0
+MIN_CIRCULARITY = 0.20   # was 0.40
+MIN_AVG_SAT     = 5      # was 12
+MIN_COVERAGE    = 0.001  # was 0.003
 
 FEATURE_COLS = [
     'area_cm2', 'diameter_cm', 'perimeter_cm', 'circularity',
