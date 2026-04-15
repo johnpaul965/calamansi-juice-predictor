@@ -404,47 +404,26 @@ def get_ripeness(all_features):
         return "🟢 Green Stage",   "#16a34a", "Dark green — unripe calamansi."
 
 def _direct_color_detect(img_blur, ppc=41.0):
-    """
-    Fallback: HSV color mask + watershed to separate touching fruits.
-    """
     hsv = cv2.cvtColor(img_blur, cv2.COLOR_RGB2HSV)
 
     mask = cv2.inRange(hsv, np.array([22, 40, 30]), np.array([85, 255, 210]))
 
-    # Small morph — fill holes but do NOT bridge gaps between separate fruits
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
+    k = np.ones((9, 9), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  np.ones((7, 7), np.uint8))
 
-    # Distance transform — peaks = fruit centers
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    if dist.max() == 0:
-        return [], []
-    _, sure_fg = cv2.threshold(dist, 0.35 * dist.max(), 255, 0)
-    sure_fg  = np.uint8(sure_fg)
-    sure_bg  = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=2)
-    unknown  = cv2.subtract(sure_bg, sure_fg)
-
-    # Watershed markers
-    _, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1
-    markers[unknown == 255] = 0
-    img_bgr = cv2.cvtColor(img_blur, cv2.COLOR_RGB2BGR)
-    markers = cv2.watershed(img_bgr, markers)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts    = sorted(cnts, key=cv2.contourArea, reverse=True)
 
     feats, result_cnts = [], []
-    for label in range(2, int(markers.max()) + 1):
-        component = np.uint8(markers == label) * 255
-        cnts, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        cnt = max(cnts, key=cv2.contourArea)
-        if cv2.contourArea(cnt) < 100:
+    for cnt in cnts[:10]:
+        if cv2.contourArea(cnt) < 150:
             continue
         peri = cv2.arcLength(cnt, True)
         if peri == 0:
             continue
         circ = (4 * np.pi * cv2.contourArea(cnt)) / (peri ** 2)
-        if circ < 0.10:
+        if circ < 0.15:
             continue
         (_, _), r = cv2.minEnclosingCircle(cnt)
         d_cm = (2 * r) / ppc
