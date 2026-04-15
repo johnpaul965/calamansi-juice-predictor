@@ -492,8 +492,7 @@ def get_fruit_features(img_blur, mask, hsv, ppc):
         if not is_calamansi(cnt, ppc):
             all_pts = np.vstack([keep[i]['cnt'] for i in idxs])
             hull    = cv2.convexHull(all_pts)
-            if not is_calamansi(hull, ppc):
-                continue
+           
             cnt = hull
 
         single = np.zeros(mask.shape, dtype=np.uint8)
